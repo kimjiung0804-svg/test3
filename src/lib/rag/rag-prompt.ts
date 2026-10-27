@@ -6,6 +6,11 @@ If the context is insufficient, say you do not have enough information in the do
 Cite sources inline using [n] where n is the chunk number from the context.
 Keep answers concise and factual. Do not invent facts outside the context.`;
 
+const LOW_CONFIDENCE_INSTRUCTION = `You are a helpful assistant for a local document Q&A system.
+No document chunks met the relevance threshold for this question (low-confidence retrieval).
+Do NOT invent document contents. Clearly tell the user that the indexed documents do not
+appear relevant enough to answer confidently, and suggest rephrasing or uploading related files.`;
+
 /** Build CitationData list from retrieved vector chunks. */
 export function chunksToCitations(
   chunks: VectorInspectChunk[],
@@ -39,7 +44,15 @@ export function formatContextBlock(chunks: VectorInspectChunk[]): string {
         c.similarity_score != null
           ? `, similarity=${c.similarity_score.toFixed(4)}`
           : "";
-      const header = `[${n}] ${c.metadata.filename}${page}${score} (chunk_id=${c.chunk_id})`;
+      const metaBits = [
+        c.metadata.file_type ? `type=${c.metadata.file_type}` : null,
+        typeof (c.metadata as { sheet?: string }).sheet === "string"
+          ? `sheet=${(c.metadata as { sheet?: string }).sheet}`
+          : null,
+      ].filter(Boolean);
+      const meta =
+        metaBits.length > 0 ? `, ${metaBits.join(", ")}` : "";
+      const header = `[${n}] ${c.metadata.filename}${page}${score}${meta} (chunk_id=${c.chunk_id})`;
       return `${header}\n${c.content}`;
     })
     .join("\n\n---\n\n");
@@ -49,13 +62,22 @@ export function formatContextBlock(chunks: VectorInspectChunk[]): string {
 export function buildRagMessages(params: {
   userMessage: string;
   chunks: VectorInspectChunk[];
+  /** When true, instruct the model that retrieval was below threshold. */
+  lowConfidence?: boolean;
 }): Array<{ role: "system" | "user" | "assistant"; content: string }> {
+  const lowConfidence =
+    Boolean(params.lowConfidence) || params.chunks.length === 0;
   const context = formatContextBlock(params.chunks);
   return [
-    { role: "system", content: SYSTEM_INSTRUCTION },
+    {
+      role: "system",
+      content: lowConfidence ? LOW_CONFIDENCE_INSTRUCTION : SYSTEM_INSTRUCTION,
+    },
     {
       role: "user",
-      content: `Context from documents:\n\n${context}\n\nUser question:\n${params.userMessage}`,
+      content: lowConfidence
+        ? `Retrieved context (empty / below threshold):\n\n${context}\n\nUser question:\n${params.userMessage}`
+        : `Context from documents:\n\n${context}\n\nUser question:\n${params.userMessage}`,
     },
   ];
 }

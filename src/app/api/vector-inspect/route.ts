@@ -15,6 +15,9 @@ interface InspectBody {
   query?: string;
   file_id?: string;
   top_k?: number;
+  /** Minimum cosine similarity; aligns with chat / Settings threshold. */
+  similarity_threshold?: number;
+  min_score?: number;
   list_all?: boolean;
   page?: number;
   limit?: number;
@@ -61,11 +64,19 @@ export async function POST(request: Request) {
     }
 
     const query = String(body.query).trim();
+    const thresholdRaw = Number(
+      body.similarity_threshold ?? body.min_score,
+    );
+    const minScore = Number.isFinite(thresholdRaw)
+      ? Math.min(1, Math.max(0, thresholdRaw))
+      : undefined;
+
     const embedded = await embedText(query);
     const chunks = await similaritySearch({
       queryEmbedding: embedded.embedding,
       fileId,
       topK,
+      minScore,
     });
 
     return NextResponse.json({
@@ -77,6 +88,8 @@ export async function POST(request: Request) {
       embedding_model: embedded.model,
       embedding_source: embedded.source,
       top_k: topK,
+      similarity_threshold: minScore ?? null,
+      low_confidence: chunks.length === 0,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Inspect failed";

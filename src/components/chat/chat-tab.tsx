@@ -111,6 +111,8 @@ export function ChatTab() {
           message: text,
           conversation_id: conversationId,
           top_k: settings.top_k,
+          similarity_threshold: settings.similarity_threshold,
+          temperature: settings.temperature,
         }),
         signal: controller.signal,
       });

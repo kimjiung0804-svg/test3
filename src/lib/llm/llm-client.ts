@@ -1,7 +1,10 @@
 /**
  * Streaming OpenAI-compatible chat client.
- * Base URL MUST come only from process.env.LOCAL_LLM_BASE_URL (no hardcoding).
+ * Default Active Server = http://192.168.0.201:11434/v1
+ * LOCAL_LLM_BASE_URL is an optional override only (never required).
  */
+
+export const DEFAULT_LLM_BASE_URL = "http://192.168.0.201:11434/v1";
 
 export class LlmConfigError extends Error {
   constructor(message: string) {
@@ -19,18 +22,40 @@ export class LlmRequestError extends Error {
   }
 }
 
-/** Read and normalize LOCAL_LLM_BASE_URL. Throws if unset. */
-export function getLocalLlmBaseUrl(): string {
-  const raw = process.env.LOCAL_LLM_BASE_URL;
-  if (typeof raw !== "string" || !raw.trim()) {
-    throw new LlmConfigError(
-      "LOCAL_LLM_BASE_URL is not set. Configure it in .env.local.",
-    );
-  }
+/** Strip trailing slashes from an OpenAI-compatible base URL. */
+export function normalizeLlmBaseUrl(raw: string): string {
   return raw.trim().replace(/\/+$/, "");
 }
 
-export function getLocalLlmModel(): string {
+/**
+ * Resolve LLM base URL.
+ * Priority: explicit override → LOCAL_LLM_BASE_URL (optional) → default 201.
+ * Never throws for a missing env var.
+ */
+export function resolveLlmBaseUrl(override?: string | null): string {
+  if (typeof override === "string" && override.trim()) {
+    return normalizeLlmBaseUrl(override);
+  }
+  const env = process.env.LOCAL_LLM_BASE_URL;
+  if (typeof env === "string" && env.trim()) {
+    return normalizeLlmBaseUrl(env);
+  }
+  return DEFAULT_LLM_BASE_URL;
+}
+
+/** @deprecated Prefer resolveLlmBaseUrl — kept for callers; does not throw. */
+export function getLocalLlmBaseUrl(): string {
+  return resolveLlmBaseUrl();
+}
+
+/**
+ * Resolve model id.
+ * Priority: explicit override → LOCAL_LLM_MODEL / LLM_MODEL → default.
+ */
+export function resolveLlmModel(override?: string | null): string {
+  if (typeof override === "string" && override.trim()) {
+    return override.trim();
+  }
   return (
     process.env.LOCAL_LLM_MODEL?.trim() ||
     process.env.LLM_MODEL?.trim() ||
@@ -38,10 +63,23 @@ export function getLocalLlmModel(): string {
   );
 }
 
-function chatCompletionsUrl(baseUrl: string): string {
-  if (/\/chat\/completions$/i.test(baseUrl)) return baseUrl;
-  if (/\/v1$/i.test(baseUrl)) return `${baseUrl}/chat/completions`;
-  return `${baseUrl}/v1/chat/completions`;
+export function getLocalLlmModel(): string {
+  return resolveLlmModel();
+}
+
+export function chatCompletionsUrl(baseUrl: string): string {
+  const base = normalizeLlmBaseUrl(baseUrl);
+  if (/\/chat\/completions$/i.test(base)) return base;
+  if (/\/v1$/i.test(base)) return `${base}/chat/completions`;
+  return `${base}/v1/chat/completions`;
+}
+
+/** Build `{base}/models` for OpenAI-compatible servers (handles trailing /v1). */
+export function modelsListUrl(baseUrl: string): string {
+  const base = normalizeLlmBaseUrl(baseUrl);
+  if (/\/models$/i.test(base)) return base;
+  if (/\/v1$/i.test(base)) return `${base}/models`;
+  return `${base}/v1/models`;
 }
 
 export interface ChatCompletionMessage {
@@ -51,21 +89,118 @@ export interface ChatCompletionMessage {
 
 export interface StreamChatOptions {
   messages: ChatCompletionMessage[];
+  /** Client-selected OpenAI-compatible base URL (preferred over env/default). */
+  baseUrl?: string;
   model?: string;
   temperature?: number;
   signal?: AbortSignal;
 }
 
+export interface LlmModelInfo {
+  id: string;
+  object?: string;
+  created?: number;
+  owned_by?: string;
+}
+
 /**
- * Stream assistant text tokens from the local OpenAI-compatible LLM.
- * Yields content deltas as they arrive.
+ * Fetch model list from an OpenAI-compatible server (`GET …/models`).
+ */
+export async function fetchLlmModels(
+  baseUrl: string,
+  signal?: AbortSignal,
+): Promise<{ models: LlmModelInfo[]; base_url: string; raw?: unknown }> {
+  const resolved = resolveLlmBaseUrl(baseUrl);
+  const url = modelsListUrl(resolved);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "LLM models request failed";
+    throw new LlmRequestError(
+      `Failed to reach LLM models at ${url}: ${msg}`,
+      502,
+    );
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    throw new LlmRequestError(
+      `LLM models error ${response.status}: ${body.slice(0, 400)}`,
+      response.status >= 400 && response.status < 600 ? response.status : 502,
+    );
+  }
+
+  const data = (await response.json()) as {
+    data?: LlmModelInfo[];
+    models?: LlmModelInfo[];
+  };
+  const list = Array.isArray(data.data)
+    ? data.data
+    : Array.isArray(data.models)
+      ? data.models
+      : [];
+
+  return {
+    models: list.filter((m) => m && typeof m.id === "string"),
+    base_url: resolved,
+    raw: data,
+  };
+}
+
+/**
+ * Lightweight connectivity probe against the models endpoint.
+ */
+export async function checkLlmHealth(
+  baseUrl?: string | null,
+  signal?: AbortSignal,
+): Promise<{
+  ok: boolean;
+  base_url: string;
+  models_url: string;
+  model_count?: number;
+  latency_ms: number;
+  error?: string;
+}> {
+  const resolved = resolveLlmBaseUrl(baseUrl);
+  const url = modelsListUrl(resolved);
+  const started = Date.now();
+
+  try {
+    const result = await fetchLlmModels(resolved, signal);
+    return {
+      ok: true,
+      base_url: resolved,
+      models_url: url,
+      model_count: result.models.length,
+      latency_ms: Date.now() - started,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      base_url: resolved,
+      models_url: url,
+      latency_ms: Date.now() - started,
+      error: err instanceof Error ? err.message : "Health check failed",
+    };
+  }
+}
+
+/**
+ * Stream assistant text tokens from the OpenAI-compatible LLM.
+ * Uses options.baseUrl when provided; otherwise env override or default 201.
  */
 export async function* streamChatCompletion(
   options: StreamChatOptions,
 ): AsyncGenerator<string, void, unknown> {
-  const baseUrl = getLocalLlmBaseUrl();
+  const baseUrl = resolveLlmBaseUrl(options.baseUrl);
   const url = chatCompletionsUrl(baseUrl);
-  const model = options.model || getLocalLlmModel();
+  const model = resolveLlmModel(options.model);
 
   let response: Response;
   try {
@@ -141,9 +276,9 @@ export async function* streamChatCompletion(
 export async function chatCompletion(
   options: StreamChatOptions,
 ): Promise<string> {
-  const baseUrl = getLocalLlmBaseUrl();
+  const baseUrl = resolveLlmBaseUrl(options.baseUrl);
   const url = chatCompletionsUrl(baseUrl);
-  const model = options.model || getLocalLlmModel();
+  const model = resolveLlmModel(options.model);
 
   let response: Response;
   try {

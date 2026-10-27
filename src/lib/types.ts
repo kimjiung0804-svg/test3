@@ -80,9 +80,23 @@ export interface ChatMessage {
 
 /** SSE payload shapes for /api/chat streaming. */
 export type ChatStreamEvent =
-  | { type: "citations"; citations: CitationData[] }
+  | {
+      type: "citations";
+      citations: CitationData[];
+      low_confidence?: boolean;
+      server_url?: string;
+      selected_model?: string;
+    }
   | { type: "chunk"; content: string }
-  | { type: "done"; done: true; conversation_id: string; message_id?: string }
+  | {
+      type: "done";
+      done: true;
+      conversation_id: string;
+      message_id?: string;
+      low_confidence?: boolean;
+      server_url?: string;
+      selected_model?: string;
+    }
   | { type: "error"; error: string; message: string };
 
 export const ACCEPTED_EXTENSIONS = [
