@@ -155,7 +155,12 @@ export async function deleteFile(
     return { deleted: false, chunks_removed: 0 };
   }
 
-  const chunksRemoved = existing.chunks_count ?? 0;
+  // Remove vector DB records first (source of truth for chunks_removed)
+  const { deleteFileVectors } = await import("@/lib/vector-db/vector-db");
+  const { chunks_removed: fromVectors } = await deleteFileVectors(fileId);
+  const chunksRemoved =
+    fromVectors > 0 ? fromVectors : (existing.chunks_count ?? 0);
+
   await rm(fileDir(storagePath, fileId), { recursive: true, force: true });
 
   const index = await readIndex(storagePath);
@@ -164,7 +169,7 @@ export async function deleteFile(
     index.filter((f) => f.id !== fileId),
   );
 
-  // Best-effort: remove empty leftover if index was the only survivor elsewhere
+  // Best-effort: touch directory listing
   try {
     await readdir(storagePath);
   } catch {
@@ -172,6 +177,31 @@ export async function deleteFile(
   }
 
   return { deleted: true, chunks_removed: chunksRemoved };
+}
+
+/** Update file metadata fields (chunks_count / indexed / chunk_config). */
+export async function updateFileMetadata(
+  fileId: string,
+  patch: Partial<
+    Pick<FileMetadata, "chunks_count" | "indexed" | "chunk_config" | "metadata">
+  >,
+): Promise<FileMetadata | null> {
+  const { storagePath } = await ensureStorageDirs();
+  const existing = await getFileMetadata(fileId);
+  if (!existing) return null;
+
+  const updated: FileMetadata = { ...existing, ...patch };
+  await writeFile(
+    path.join(fileDir(storagePath, fileId), METADATA_FILENAME),
+    JSON.stringify(updated, null, 2),
+    "utf-8",
+  );
+
+  const index = await readIndex(storagePath);
+  const without = index.filter((f) => f.id !== fileId);
+  without.push(updated);
+  await writeIndex(storagePath, without);
+  return updated;
 }
 
 export function getMaxFileSizeBytes(): number {

@@ -6,12 +6,19 @@ import {
   ensureStorageDirs,
   getMaxFileSizeBytes,
   saveUploadedFile,
+  updateFileMetadata,
 } from "@/lib/storage";
 import {
   ACCEPTED_EXTENSIONS,
   extensionToFileType,
   type FileMetadata,
 } from "@/lib/types";
+import {
+  chunkText,
+  resolveChunkOptions,
+} from "@/lib/chunking/text-chunker";
+import { embedTexts } from "@/lib/embedding/embedding-client";
+import { indexFileChunks } from "@/lib/vector-db/vector-db";
 
 function errorResponse(status: number, error: string, message: string) {
   return NextResponse.json({ error, message }, { status });
@@ -58,14 +65,14 @@ export async function POST(request: Request) {
 
     const chunkSizeRaw = form.get("chunk_size");
     const chunkOverlapRaw = form.get("chunk_overlap");
-    const chunk_size =
+    const chunkOpts = resolveChunkOptions(
       chunkSizeRaw != null && String(chunkSizeRaw).trim() !== ""
         ? Number(chunkSizeRaw)
-        : 500;
-    const chunk_overlap =
+        : undefined,
       chunkOverlapRaw != null && String(chunkOverlapRaw).trim() !== ""
         ? Number(chunkOverlapRaw)
-        : 50;
+        : undefined,
+    );
 
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
@@ -87,6 +94,19 @@ export async function POST(request: Request) {
       `original${ext}`,
     );
 
+    const slices = chunkText(extracted.text, chunkOpts);
+    const embeddings = await embedTexts(slices.map((s) => s.content));
+    const { chunks_created } = await indexFileChunks({
+      fileId,
+      filename,
+      fileType,
+      chunks: slices,
+      embeddings: embeddings.map((e) => ({
+        embedding: e.embedding,
+        model: e.model,
+      })),
+    });
+
     const metadata: FileMetadata = {
       id: fileId,
       filename,
@@ -94,11 +114,11 @@ export async function POST(request: Request) {
       size: buffer.byteLength,
       storage_path: storageRelative,
       uploaded_at: uploadedAt,
-      chunks_count: 0,
-      indexed: false,
+      chunks_count: chunks_created,
+      indexed: chunks_created > 0,
       chunk_config: {
-        chunk_size: Number.isFinite(chunk_size) ? chunk_size : 500,
-        chunk_overlap: Number.isFinite(chunk_overlap) ? chunk_overlap : 50,
+        chunk_size: chunkOpts.chunkSize,
+        chunk_overlap: chunkOpts.chunkOverlap,
       },
       metadata: extracted.metadata,
     };
@@ -111,14 +131,30 @@ export async function POST(request: Request) {
       extractedText: extracted.text,
     });
 
+    // Ensure index reflects final chunk counts (saveUploadedFile already wrote meta)
+    await updateFileMetadata(fileId, {
+      chunks_count: chunks_created,
+      indexed: chunks_created > 0,
+      chunk_config: {
+        chunk_size: chunkOpts.chunkSize,
+        chunk_overlap: chunkOpts.chunkOverlap,
+      },
+    });
+
     return NextResponse.json({
       file_id: fileId,
       filename,
       size: buffer.byteLength,
-      chunks_created: 0,
+      chunks_created,
       indexed_at: uploadedAt,
       text_extracted: true,
       text_length: extracted.text.length,
+      chunk_config: {
+        chunk_size: chunkOpts.chunkSize,
+        chunk_overlap: chunkOpts.chunkOverlap,
+      },
+      embedding_model: embeddings[0]?.model ?? null,
+      embedding_source: embeddings[0]?.source ?? null,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Upload failed";
