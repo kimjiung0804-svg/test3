@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Loader2, SendHorizontal, Sparkles } from "lucide-react";
-import { ServerModelControls } from "@/components/llm/server-model-controls";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -15,7 +14,6 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Textarea } from "@/components/ui/textarea";
 import { useRagSettings } from "@/hooks/use-rag-settings";
-import { resolveActiveServerUrl } from "@/lib/llm-servers";
 import type { CitationData, ChatStreamEvent } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -115,8 +113,6 @@ export function ChatTab() {
           top_k: settings.top_k,
           similarity_threshold: settings.similarity_threshold,
           temperature: settings.temperature,
-          server_url: resolveActiveServerUrl(settings),
-          selected_model: settings.selected_model,
         }),
         signal: controller.signal,
       });
@@ -232,12 +228,6 @@ export function ChatTab() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="border-b bg-background/95 px-3 py-2 backdrop-blur sm:px-4">
-        <div className="mx-auto w-full max-w-3xl">
-          <ServerModelControls variant="header" />
-        </div>
-      </div>
-
       <ScrollArea className="min-h-0 flex-1 px-1">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-3 py-4">
           {messages.length === 0 && (
@@ -249,7 +239,6 @@ export function ChatTab() {
                 <p className="text-base font-medium text-foreground">Ask your documents</p>
                 <p className="mt-1 text-sm">
                   Upload files in File Manager, then ask questions with streaming answers and source badges.
-                  Switch server/model anytime from the header above.
                 </p>
               </div>
             </div>
@@ -337,9 +326,6 @@ export function ChatTab() {
         </div>
         <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-muted-foreground">
           Enter to send · Shift+Enter for newline · Top-K {settings.top_k}
-          {settings.selected_model
-            ? ` · ${settings.selected_model}`
-            : ""}
         </p>
       </div>
 
