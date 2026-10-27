@@ -17,14 +17,20 @@ import type { ChatStreamEvent } from "@/lib/types";
 interface ChatBody {
   message?: string;
   conversation_id?: string;
+  /** Alias used by chat-history UI (same as conversation_id). */
+  session_id?: string;
   top_k?: number;
   file_filter?: string[];
   /** Per-request OpenAI-compatible base URL (UI selector). Env is default only. */
   baseUrl?: string;
   /** Alias for baseUrl. */
   base_url?: string;
+  /** Alias for baseUrl (Multi-server selector). */
+  server_url?: string;
   /** Per-request model id (UI selector). */
   model?: string;
+  /** Alias for model. */
+  selected_model?: string;
 }
 
 function errorResponse(status: number, error: string, message: string) {
@@ -57,18 +63,21 @@ export async function POST(request: Request) {
       ? body.file_filter.map(String).filter((id) => id.trim().length > 0)
       : undefined;
     const conversationId =
-      typeof body.conversation_id === "string" && body.conversation_id.trim()
-        ? body.conversation_id.trim()
-        : undefined;
+      (typeof body.conversation_id === "string" &&
+        body.conversation_id.trim()) ||
+      (typeof body.session_id === "string" && body.session_id.trim()) ||
+      undefined;
 
     const baseUrlOverride =
       (typeof body.baseUrl === "string" && body.baseUrl.trim()) ||
       (typeof body.base_url === "string" && body.base_url.trim()) ||
+      (typeof body.server_url === "string" && body.server_url.trim()) ||
       undefined;
     const modelOverride =
-      typeof body.model === "string" && body.model.trim()
-        ? body.model.trim()
-        : undefined;
+      (typeof body.model === "string" && body.model.trim()) ||
+      (typeof body.selected_model === "string" &&
+        body.selected_model.trim()) ||
+      undefined;
 
     // 1) Embed query  2) Top-K similarity search
     const embedded = await embedText(message);
