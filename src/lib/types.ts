@@ -56,6 +56,35 @@ export interface VectorInspectChunk extends VectorRecord {
   similarity_score?: number;
 }
 
+/** Source chunk metadata returned with RAG chat responses (spec CitationData). */
+export interface CitationData {
+  chunk_id: string;
+  file_id: string;
+  filename: string;
+  similarity_score: number;
+  page_number: number | null;
+  content_preview?: string;
+  sequence_number?: number;
+}
+
+/** Conversation history record (spec ChatMessage). */
+export interface ChatMessage {
+  id: string;
+  conversation_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  citations?: CitationData[];
+  tokens_used?: number | null;
+  created_at: string;
+}
+
+/** SSE payload shapes for /api/chat streaming. */
+export type ChatStreamEvent =
+  | { type: "citations"; citations: CitationData[] }
+  | { type: "chunk"; content: string }
+  | { type: "done"; done: true; conversation_id: string; message_id?: string }
+  | { type: "error"; error: string; message: string };
+
 export const ACCEPTED_EXTENSIONS = [
   ".pdf",
   ".docx",

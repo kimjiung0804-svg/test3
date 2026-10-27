@@ -245,12 +245,20 @@ export async function listAllChunks(params?: {
 export async function similaritySearch(params: {
   queryEmbedding: number[];
   fileId?: string;
+  /** Limit search to one or more file IDs (chat `file_filter`). */
+  fileIds?: string[];
   topK?: number;
 }): Promise<VectorInspectChunk[]> {
   const vectorDbPath = await ensureVectorDirs();
   const catalog = await readCatalog(vectorDbPath);
-  const fileIds = params.fileId
-    ? catalog.files.filter((f) => f.file_id === params.fileId).map((f) => f.file_id)
+  const filterSet =
+    params.fileIds && params.fileIds.length > 0
+      ? new Set(params.fileIds)
+      : params.fileId
+        ? new Set([params.fileId])
+        : null;
+  const fileIds = filterSet
+    ? catalog.files.filter((f) => filterSet.has(f.file_id)).map((f) => f.file_id)
     : catalog.files.map((f) => f.file_id);
 
   const scored: VectorInspectChunk[] = [];
