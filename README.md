@@ -1,36 +1,44 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Local Document RAG (`test3`)
+
+Local-only PDF / DOCX / XLSX upload, text extraction, chunking, and vector inspection.
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+cp .env.example .env.local
+pnpm install
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## XLSX extraction & re-indexing
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Excel sheets are scanned for a header row (labels such as `No`, `업체명`, `부스위치`), then each data row is emitted as a self-contained **header:value** line (not raw CSV). Example:
 
-## Learn More
+```text
+# Sheet: 참가사리스트
+# Headers (Excel row 1): No | 업체명 | 부스위치
+[Sheet: 참가사리스트] Row 298 | No: 298 | 업체명: 삼성전자 | 부스위치: C100
+```
 
-To learn more about Next.js, take a look at the following resources:
+Preview (includes structured `rows` for row-level inspection; optional `?q=` filter):
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+curl -s "http://localhost:3000/api/files/<file_id>/preview?q=삼성전자" \
+  | jq '{text_length, row_count, rows: .rows[:3]}'
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+After a parser fix, re-extract and re-index an already-uploaded file (keeps the same `file_id`):
 
-## Deploy on Vercel
+```bash
+curl -s -X POST "http://localhost:3000/api/files/<file_id>/reparse" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Optional body: `{ "chunk_size": 500, "chunk_overlap": 50 }`.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Alternatively delete + re-upload via `DELETE /api/files?file_id=...` then `POST /api/upload`.
+
+Empty extracts are rejected on upload/reparse with `empty_extract` and logged as `[extract]` / `[reparse]`.
