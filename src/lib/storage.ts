@@ -20,22 +20,29 @@ export function getStoragePaths() {
     process.env.VECTORDB_PATH ??
     process.env.VECTOR_DB_PATH ??
     path.join(".", "storage", "vectordb");
+  const chatsPath =
+    process.env.CHATS_PATH ??
+    process.env.CHAT_STORAGE_PATH ??
+    path.join(".", "storage", "chats");
 
   return {
     storagePath: path.resolve(storagePath),
     vectorDbPath: path.resolve(vectorDbPath),
+    chatsPath: path.resolve(chatsPath),
   };
 }
 
-/** Create upload and vector DB directories if missing (idempotent). */
+/** Create upload, vector DB, and chat session directories if missing (idempotent). */
 export async function ensureStorageDirs(): Promise<{
   storagePath: string;
   vectorDbPath: string;
+  chatsPath: string;
 }> {
-  const { storagePath, vectorDbPath } = getStoragePaths();
+  const { storagePath, vectorDbPath, chatsPath } = getStoragePaths();
   await mkdir(storagePath, { recursive: true });
   await mkdir(vectorDbPath, { recursive: true });
-  return { storagePath, vectorDbPath };
+  await mkdir(chatsPath, { recursive: true });
+  return { storagePath, vectorDbPath, chatsPath };
 }
 
 function indexPath(storagePath: string) {
