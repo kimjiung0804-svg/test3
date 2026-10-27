@@ -17,11 +17,9 @@ interface InspectBody {
   query?: string;
   file_id?: string;
   top_k?: number;
-  /** Relevance threshold / minScore (0–1). Default from RAG settings (0.5). */
-  min_score?: number;
+  /** Minimum cosine similarity; aligns with chat / Settings threshold. */
   similarity_threshold?: number;
-  /** When true, include hits below threshold (separately). Default true for inspect. */
-  include_below_threshold?: boolean;
+  min_score?: number;
   list_all?: boolean;
   page?: number;
   limit?: number;
@@ -76,6 +74,13 @@ export async function POST(request: Request) {
     }
 
     const query = String(body.query).trim();
+    const thresholdRaw = Number(
+      body.similarity_threshold ?? body.min_score,
+    );
+    const minScore = Number.isFinite(thresholdRaw)
+      ? Math.min(1, Math.max(0, thresholdRaw))
+      : undefined;
+
     const embedded = await embedText(query);
     const result = await similaritySearchDetailed({
       queryEmbedding: embedded.embedding,
@@ -83,7 +88,6 @@ export async function POST(request: Request) {
       fileId,
       topK,
       minScore,
-      includeBelowThreshold: includeBelow,
     });
 
     return NextResponse.json({
@@ -96,10 +100,9 @@ export async function POST(request: Request) {
       stats,
       embedding_model: embedded.model,
       embedding_source: embedded.source,
-      top_k: result.top_k,
-      min_score: result.min_score,
-      similarity_threshold: result.min_score,
-      hybrid_boost_applied: result.hybrid_boost_applied,
+      top_k: topK,
+      similarity_threshold: minScore ?? null,
+      low_confidence: chunks.length === 0,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Inspect failed";

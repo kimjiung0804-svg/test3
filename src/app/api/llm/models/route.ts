@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import {
-  LlmRequestError,
+  DEFAULT_LLM_BASE_URL,
   fetchLlmModels,
+  LlmRequestError,
+  resolveLlmBaseUrl,
 } from "@/lib/llm/llm-client";
 
 function errorResponse(status: number, error: string, message: string) {
@@ -9,48 +11,35 @@ function errorResponse(status: number, error: string, message: string) {
 }
 
 /**
- * Proxy OpenAI-compatible `{base}/v1/models`.
- * GET  /api/llm/models?baseUrl=...
- * POST /api/llm/models  { "baseUrl"?: string }
+ * GET /api/llm/models?server_url=...
+ * Proxies to `{server_url}/models` (OpenAI-compatible).
+ * Falls back to default Active Server (201) when server_url is omitted.
  */
-async function handle(request: Request) {
+export async function GET(request: Request) {
   try {
-    let baseUrl: string | undefined;
+    const url = new URL(request.url);
+    const serverUrl =
+      url.searchParams.get("server_url") ||
+      url.searchParams.get("baseUrl") ||
+      url.searchParams.get("base_url") ||
+      undefined;
 
-    if (request.method === "GET") {
-      const url = new URL(request.url);
-      const q = url.searchParams.get("baseUrl");
-      if (q?.trim()) baseUrl = q.trim();
-    } else {
-      try {
-        const body = (await request.json()) as { baseUrl?: string };
-        if (typeof body.baseUrl === "string" && body.baseUrl.trim()) {
-          baseUrl = body.baseUrl.trim();
-        }
-      } catch {
-        /* empty body → use resolved defaults */
-      }
-    }
+    const baseUrl = resolveLlmBaseUrl(serverUrl);
+    const result = await fetchLlmModels(baseUrl, request.signal);
 
-    const result = await fetchLlmModels({
-      baseUrl,
-      signal: request.signal,
+    return NextResponse.json({
+      object: "list",
+      data: result.models,
+      models: result.models,
+      base_url: result.base_url,
+      default_base_url: DEFAULT_LLM_BASE_URL,
     });
-
-    return NextResponse.json(result);
   } catch (err) {
     if (err instanceof LlmRequestError) {
-      return errorResponse(err.status, "models_proxy_failed", err.message);
+      return errorResponse(err.status, "llm_models_failed", err.message);
     }
-    const message = err instanceof Error ? err.message : "Models proxy failed";
-    return errorResponse(500, "models_proxy_failed", message);
+    const message =
+      err instanceof Error ? err.message : "Failed to list LLM models";
+    return errorResponse(502, "llm_models_failed", message);
   }
-}
-
-export async function GET(request: Request) {
-  return handle(request);
-}
-
-export async function POST(request: Request) {
-  return handle(request);
 }

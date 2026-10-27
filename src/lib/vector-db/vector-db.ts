@@ -271,36 +271,11 @@ export interface SimilaritySearchParams {
   fileIds?: string[];
   topK?: number;
   /**
-   * Minimum hybrid score to keep (relevance threshold / minScore).
-   * Default 0 when unset so callers that omit it stay backward-compatible;
-   * chat / vector-inspect pass settings.similarity_threshold (default 0.5).
+   * Minimum cosine similarity (0–1). Chunks below this are dropped.
+   * When set, an empty result means low-confidence / no relevant context.
    */
   minScore?: number;
-  /** When true, also return below-threshold hits (marked) for inspect UI. */
-  includeBelowThreshold?: boolean;
-  /** Disable keyword/filename boosts (pure cosine). Default: boost when queryText set. */
-  disableHybridBoost?: boolean;
-}
-
-export interface SimilaritySearchResult {
-  chunks: VectorInspectChunk[];
-  below_threshold: VectorInspectChunk[];
-  min_score: number;
-  top_k: number;
-  hybrid_boost_applied: boolean;
-}
-
-export async function similaritySearch(
-  params: SimilaritySearchParams,
-): Promise<VectorInspectChunk[]> {
-  const result = await similaritySearchDetailed(params);
-  return result.chunks;
-}
-
-/** Full retrieval result including threshold-filtered leftovers and score stats. */
-export async function similaritySearchDetailed(
-  params: SimilaritySearchParams,
-): Promise<SimilaritySearchResult> {
+}): Promise<VectorInspectChunk[]> {
   const vectorDbPath = await ensureVectorDirs();
   const catalog = await readCatalog(vectorDbPath);
   const filterSet =
@@ -367,30 +342,18 @@ export async function similaritySearchDetailed(
 
   scored.sort((a, b) => (b.similarity_score ?? 0) - (a.similarity_score ?? 0));
   const topK = Math.max(1, Math.min(100, params.topK ?? 10));
+  let top = scored.slice(0, topK);
 
-  const passed: VectorInspectChunk[] = [];
-  const below: VectorInspectChunk[] = [];
-  for (const item of scored) {
-    const score = item.similarity_score ?? 0;
-    if (score >= minScore) {
-      passed.push({ ...item, below_threshold: false });
-    } else {
-      below.push({ ...item, below_threshold: true });
-    }
+  if (
+    typeof params.minScore === "number" &&
+    Number.isFinite(params.minScore) &&
+    params.minScore > 0
+  ) {
+    const threshold = Math.min(1, Math.max(0, params.minScore));
+    top = top.filter((c) => (c.similarity_score ?? 0) >= threshold);
   }
 
-  const chunks = passed.slice(0, topK);
-  const below_threshold = params.includeBelowThreshold
-    ? below.slice(0, topK)
-    : [];
-
-  return {
-    chunks,
-    below_threshold,
-    min_score: minScore,
-    top_k: topK,
-    hybrid_boost_applied: useHybrid,
-  };
+  return top;
 }
 
 export async function getVectorStats(): Promise<{

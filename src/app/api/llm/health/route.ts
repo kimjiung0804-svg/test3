@@ -1,50 +1,48 @@
 import { NextResponse } from "next/server";
-import { probeLlmHealth } from "@/lib/llm/llm-client";
-
-function errorResponse(status: number, error: string, message: string) {
-  return NextResponse.json({ error, message }, { status });
-}
+import {
+  checkLlmHealth,
+  DEFAULT_LLM_BASE_URL,
+  resolveLlmBaseUrl,
+} from "@/lib/llm/llm-client";
 
 /**
- * Health-check the configured / requested OpenAI-compatible LLM base URL.
- * GET  /api/llm/health?baseUrl=...
- * POST /api/llm/health  { "baseUrl"?: string }
+ * GET /api/llm/health?server_url=...
+ * POST /api/llm/health  body: { server_url?: string }
+ * Connectivity probe against the selected (or default 201) LLM server.
  */
-async function handle(request: Request) {
-  try {
-    let baseUrl: string | undefined;
-
-    if (request.method === "GET") {
-      const url = new URL(request.url);
-      const q = url.searchParams.get("baseUrl");
-      if (q?.trim()) baseUrl = q.trim();
-    } else {
-      try {
-        const body = (await request.json()) as { baseUrl?: string };
-        if (typeof body.baseUrl === "string" && body.baseUrl.trim()) {
-          baseUrl = body.baseUrl.trim();
-        }
-      } catch {
-        /* empty body → use resolved defaults */
-      }
-    }
-
-    const result = await probeLlmHealth({
-      baseUrl,
-      signal: request.signal,
-    });
-
-    return NextResponse.json(result, { status: result.ok ? 200 : 503 });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Health check failed";
-    return errorResponse(500, "health_check_failed", message);
-  }
+async function runHealth(serverUrl: string | undefined, signal?: AbortSignal) {
+  const baseUrl = resolveLlmBaseUrl(serverUrl);
+  const result = await checkLlmHealth(baseUrl, signal);
+  return NextResponse.json(
+    {
+      ...result,
+      default_base_url: DEFAULT_LLM_BASE_URL,
+    },
+    { status: result.ok ? 200 : 503 },
+  );
 }
 
 export async function GET(request: Request) {
-  return handle(request);
+  const url = new URL(request.url);
+  const serverUrl =
+    url.searchParams.get("server_url") ||
+    url.searchParams.get("baseUrl") ||
+    url.searchParams.get("base_url") ||
+    undefined;
+  return runHealth(serverUrl || undefined, request.signal);
 }
 
 export async function POST(request: Request) {
-  return handle(request);
+  let serverUrl: string | undefined;
+  try {
+    const body = (await request.json()) as {
+      server_url?: string;
+      baseUrl?: string;
+      base_url?: string;
+    };
+    serverUrl = body.server_url || body.baseUrl || body.base_url || undefined;
+  } catch {
+    serverUrl = undefined;
+  }
+  return runHealth(serverUrl, request.signal);
 }

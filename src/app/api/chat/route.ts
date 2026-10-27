@@ -4,8 +4,9 @@ import { embedText } from "@/lib/embedding/embedding-client";
 import { similaritySearchDetailed } from "@/lib/vector-db/vector-db";
 import { resolveMinScore } from "@/lib/vector-db/hybrid-score";
 import {
-  LlmConfigError,
   LlmRequestError,
+  resolveLlmBaseUrl,
+  resolveLlmModel,
   streamChatCompletion,
 } from "@/lib/llm/llm-client";
 import {
@@ -13,6 +14,7 @@ import {
   chunksToCitations,
 } from "@/lib/rag/rag-prompt";
 import { appendChatTurn } from "@/lib/chat/conversation-store";
+import { DEFAULT_RAG_SETTINGS } from "@/lib/rag-settings";
 import type { ChatStreamEvent } from "@/lib/types";
 import { DEFAULT_RAG_SETTINGS } from "@/lib/rag-settings";
 
@@ -26,16 +28,15 @@ interface ChatBody {
   min_score?: number;
   similarity_threshold?: number;
   file_filter?: string[];
-  /** Per-request OpenAI-compatible base URL (UI selector). Env is default only. */
-  baseUrl?: string;
-  /** Alias for baseUrl. */
-  base_url?: string;
-  /** Alias for baseUrl (Multi-server selector). */
+  /** Client-selected OpenAI-compatible base URL. */
   server_url?: string;
-  /** Per-request model id (UI selector). */
-  model?: string;
-  /** Alias for model. */
+  baseUrl?: string;
+  /** Client-selected model id. */
   selected_model?: string;
+  model?: string;
+  /** Minimum similarity (0–1); aligns with Vector / Settings threshold. */
+  similarity_threshold?: number;
+  temperature?: number;
 }
 
 function errorResponse(status: number, error: string, message: string) {
@@ -44,6 +45,16 @@ function errorResponse(status: number, error: string, message: string) {
 
 function sseEncode(event: ChatStreamEvent): string {
   return `data: ${JSON.stringify(event)}\n\n`;
+}
+
+function pickServerUrl(body: ChatBody): string | undefined {
+  const raw = body.server_url ?? body.baseUrl;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
+}
+
+function pickModel(body: ChatBody): string | undefined {
+  const raw = body.selected_model ?? body.model;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : undefined;
 }
 
 export async function POST(request: Request) {
@@ -63,10 +74,9 @@ export async function POST(request: Request) {
       return errorResponse(400, "invalid_request", "Field 'message' is required");
     }
 
-    const topK = Math.max(1, Math.min(50, Number(body.top_k) || 5));
-    const minScore = resolveMinScore(
-      body.min_score ?? body.similarity_threshold,
-      DEFAULT_RAG_SETTINGS.similarity_threshold,
+    const topK = Math.max(
+      1,
+      Math.min(50, Number(body.top_k) || DEFAULT_RAG_SETTINGS.top_k),
     );
     const fileFilter = Array.isArray(body.file_filter)
       ? body.file_filter.map(String).filter((id) => id.trim().length > 0)
@@ -77,30 +87,36 @@ export async function POST(request: Request) {
       (typeof body.session_id === "string" && body.session_id.trim()) ||
       undefined;
 
-    const baseUrlOverride =
-      (typeof body.baseUrl === "string" && body.baseUrl.trim()) ||
-      (typeof body.base_url === "string" && body.base_url.trim()) ||
-      (typeof body.server_url === "string" && body.server_url.trim()) ||
-      undefined;
-    const modelOverride =
-      (typeof body.model === "string" && body.model.trim()) ||
-      (typeof body.selected_model === "string" &&
-        body.selected_model.trim()) ||
-      undefined;
+    const thresholdRaw = Number(body.similarity_threshold);
+    const similarityThreshold = Number.isFinite(thresholdRaw)
+      ? Math.min(1, Math.max(0, thresholdRaw))
+      : DEFAULT_RAG_SETTINGS.similarity_threshold;
 
-    // 1) Embed query  2) Hybrid Top-K + relevance threshold
+    const clientServerUrl = pickServerUrl(body);
+    const clientModel = pickModel(body);
+    const baseUrl = resolveLlmBaseUrl(clientServerUrl);
+    const model = resolveLlmModel(clientModel);
+    const temperature =
+      typeof body.temperature === "number" && Number.isFinite(body.temperature)
+        ? body.temperature
+        : undefined;
+
+    // 1) Embed query  2) Top-K similarity search with relevance threshold
     const embedded = await embedText(message);
     const retrieval = await similaritySearchDetailed({
       queryEmbedding: embedded.embedding,
       queryText: message,
       fileIds: fileFilter,
       topK,
-      minScore,
-      includeBelowThreshold: false,
+      minScore: similarityThreshold,
     });
-    const chunks = retrieval.chunks;
+    const lowConfidence = chunks.length === 0;
     const citations = chunksToCitations(chunks);
-    const messages = buildRagMessages({ userMessage: message, chunks });
+    const messages = buildRagMessages({
+      userMessage: message,
+      chunks,
+      lowConfidence,
+    });
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
@@ -112,12 +128,19 @@ export async function POST(request: Request) {
         let assistantText = "";
         try {
           // Emit citations first so the UI can render source badges while streaming
-          send({ type: "citations", citations });
+          send({
+            type: "citations",
+            citations,
+            low_confidence: lowConfidence,
+            server_url: baseUrl,
+            selected_model: model,
+          });
 
           for await (const token of streamChatCompletion({
             messages,
-            baseUrl: baseUrlOverride,
-            model: modelOverride,
+            baseUrl,
+            model,
+            temperature,
             signal: request.signal,
           })) {
             assistantText += token;
@@ -136,15 +159,12 @@ export async function POST(request: Request) {
             done: true,
             conversation_id: saved.conversation_id,
             message_id: saved.assistant.id,
+            low_confidence: lowConfidence,
+            server_url: baseUrl,
+            selected_model: model,
           });
         } catch (err) {
-          if (err instanceof LlmConfigError) {
-            send({
-              type: "error",
-              error: "llm_not_configured",
-              message: err.message,
-            });
-          } else if (err instanceof LlmRequestError) {
+          if (err instanceof LlmRequestError) {
             send({
               type: "error",
               error: "llm_request_failed",
@@ -170,9 +190,6 @@ export async function POST(request: Request) {
       },
     });
   } catch (err) {
-    if (err instanceof LlmConfigError) {
-      return errorResponse(503, "llm_not_configured", err.message);
-    }
     const message = err instanceof Error ? err.message : "Chat failed";
     return errorResponse(500, "chat_failed", message);
   }

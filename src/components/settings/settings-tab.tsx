@@ -37,42 +37,44 @@ export function SettingsTab() {
           return;
         }
 
+        const healthRes = await fetch("/api/llm/health");
+        const health = await healthRes.json().catch(() => ({}));
+
+        if (cancelled) return;
+
+        if (healthRes.status === 404) {
+          setLlmStatus("missing");
+          setLlmDetail("/api/llm/health not deployed yet — UI is bound and ready");
+          return;
+        }
+
+        if (health.ok) {
+          setLlmStatus("ready");
+          setLlmDetail(
+            `LLM reachable · ${health.base_url || "default 201"} · ${health.model_count ?? "?"} models`,
+          );
+          return;
+        }
+
+        // Server routes are up even if the remote LLM is offline
         const chatRes = await fetch("/api/chat", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: "" }),
         });
         const body = await chatRes.json().catch(() => ({}));
-
         if (cancelled) return;
 
-        if (chatRes.status === 404) {
-          setLlmStatus("missing");
-          setLlmDetail("/api/chat not deployed yet — UI is bound and ready");
-          return;
-        }
-
-        if (
-          body.error === "llm_not_configured" ||
-          chatRes.status === 503
-        ) {
-          setLlmStatus("error");
+        if (body.error === "invalid_request" || chatRes.status === 400) {
+          setLlmStatus("ready");
           setLlmDetail(
-            body.message ||
-              "Set LOCAL_LLM_BASE_URL in .env.local (OpenAI-compatible endpoint)",
+            `Chat API ready · default ${health.default_base_url || "http://192.168.0.201:11434/v1"} (LLM probe: ${health.error || "unreachable"})`,
           );
           return;
         }
 
-        // empty message → invalid_request means route is live
-        if (body.error === "invalid_request" || chatRes.status === 400) {
-          setLlmStatus("ready");
-          setLlmDetail("Chat API reachable · LLM via LOCAL_LLM_BASE_URL");
-          return;
-        }
-
-        setLlmStatus("ready");
-        setLlmDetail("Chat API reachable");
+        setLlmStatus("error");
+        setLlmDetail(health.error || "LLM health check failed");
       } catch {
         if (!cancelled) {
           setLlmStatus("error");
@@ -136,8 +138,10 @@ export function SettingsTab() {
             </div>
             <p className="text-sm text-muted-foreground">{llmDetail}</p>
             <p className="w-full text-xs text-muted-foreground">
-              Base URL is server-side only (
-              <code>LOCAL_LLM_BASE_URL</code>) — not exposed to the browser.
+              Default Active Server{" "}
+              <code>http://192.168.0.201:11434/v1</code>. Pass{" "}
+              <code>server_url</code> / <code>selected_model</code> from the
+              client; <code>LOCAL_LLM_BASE_URL</code> is an optional override.
             </p>
           </CardContent>
         </Card>
