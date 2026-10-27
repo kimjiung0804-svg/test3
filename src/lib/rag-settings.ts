@@ -72,9 +72,13 @@ export function saveRagSettings(settings: RagSettings): void {
     selected_model: settings.selected_model.trim(),
   };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
-  window.dispatchEvent(
-    new CustomEvent("rag-settings-changed", { detail: normalized }),
-  );
+  // Defer broadcast so listeners never setState synchronously during the
+  // caller's render / setState updater (ChatTab ← ServerModelControls).
+  queueMicrotask(() => {
+    window.dispatchEvent(
+      new CustomEvent("rag-settings-changed", { detail: normalized }),
+    );
+  });
 }
 
 export function formatBytes(bytes: number): string {

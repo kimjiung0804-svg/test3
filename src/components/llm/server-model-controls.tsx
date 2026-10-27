@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 import { CheckCircle2, CircleAlert, Loader2, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -45,11 +45,16 @@ export function ServerModelControls({
   }, [settings.custom_server_url]);
 
   // Keep selected_model in sync with the live model list for the active server.
+  // startTransition + deferred broadcast in useRagSettings avoids updating
+  // ChatTab while this component is still in its render/update cycle.
   useEffect(() => {
     if (loading || models.length === 0) return;
     const stillValid = models.some((m) => m.id === settings.selected_model);
     if (!stillValid) {
-      update({ selected_model: models[0]!.id });
+      const nextModel = models[0]!.id;
+      startTransition(() => {
+        update({ selected_model: nextModel });
+      });
     }
   }, [loading, models, settings.selected_model, update]);
 
