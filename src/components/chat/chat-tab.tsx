@@ -1,7 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Loader2, SendHorizontal, Sparkles } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Loader2,
+  PanelLeft,
+  SendHorizontal,
+  Sparkles,
+} from "lucide-react";
+import {
+  ChatHistoryPanel,
+  type ChatSessionSummary,
+} from "@/components/chat/chat-history-panel";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -12,9 +21,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Sheet,
+  SheetContent,
+  SheetHeader,
+  SheetTitle,
+} from "@/components/ui/sheet";
 import { Textarea } from "@/components/ui/textarea";
 import { useRagSettings } from "@/hooks/use-rag-settings";
-import type { CitationData, ChatStreamEvent } from "@/lib/types";
+import type {
+  ChatMessage,
+  ChatSession,
+  CitationData,
+  ChatStreamEvent,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type UiMessage = {
@@ -25,6 +45,8 @@ type UiMessage = {
   streaming?: boolean;
   error?: string;
 };
+
+const ACTIVE_SESSION_KEY = "rag-doc-chat-active-session";
 
 const FILE_COLORS = [
   "bg-sky-100 text-sky-800 border-sky-200",
@@ -68,6 +90,36 @@ function renderMarkdownLite(text: string) {
   });
 }
 
+function toUiMessages(messages: ChatMessage[]): UiMessage[] {
+  return messages
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({
+      id: m.id,
+      role: m.role as "user" | "assistant",
+      content: m.content,
+      citations: m.citations,
+    }));
+}
+
+function readStoredSessionId(): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return localStorage.getItem(ACTIVE_SESSION_KEY) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function storeSessionId(id: string | undefined) {
+  if (typeof window === "undefined") return;
+  try {
+    if (id) localStorage.setItem(ACTIVE_SESSION_KEY, id);
+    else localStorage.removeItem(ACTIVE_SESSION_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
 export function ChatTab() {
   const { settings } = useRagSettings();
   const [messages, setMessages] = useState<UiMessage[]>([]);
@@ -75,16 +127,142 @@ export function ChatTab() {
   const [streaming, setStreaming] = useState(false);
   const [conversationId, setConversationId] = useState<string | undefined>();
   const [citation, setCitation] = useState<CitationData | null>(null);
+  const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [creating, setCreating] = useState(false);
+  const [loadingThread, setLoadingThread] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [bootstrapped, setBootstrapped] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const conversationIdRef = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    conversationIdRef.current = conversationId;
+    storeSessionId(conversationId);
+  }, [conversationId]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const refreshSessions = useCallback(async () => {
+    try {
+      const res = await fetch("/api/chats");
+      if (!res.ok) throw new Error(`List chats failed (${res.status})`);
+      const data = (await res.json()) as {
+        chats: ChatSessionSummary[];
+        total: number;
+      };
+      setSessions(data.chats ?? []);
+      return data.chats ?? [];
+    } catch {
+      setSessions([]);
+      return [] as ChatSessionSummary[];
+    }
+  }, []);
+
+  const loadSession = useCallback(async (id: string) => {
+    setLoadingThread(true);
+    try {
+      const res = await fetch(`/api/chats/${id}`);
+      if (!res.ok) throw new Error(`Load chat failed (${res.status})`);
+      const chat = (await res.json()) as ChatSession;
+      setConversationId(chat.id);
+      setMessages(toUiMessages(chat.messages ?? []));
+      setMobileOpen(false);
+    } catch {
+      setConversationId(undefined);
+      setMessages([]);
+    } finally {
+      setLoadingThread(false);
+    }
+  }, []);
+
+  const createSession = useCallback(async () => {
+    setCreating(true);
+    try {
+      const res = await fetch("/api/chats", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      if (!res.ok) throw new Error(`Create chat failed (${res.status})`);
+      const chat = (await res.json()) as ChatSession;
+      setConversationId(chat.id);
+      setMessages([]);
+      setMobileOpen(false);
+      await refreshSessions();
+      return chat.id;
+    } catch {
+      return undefined;
+    } finally {
+      setCreating(false);
+    }
+  }, [refreshSessions]);
+
+  const deleteSession = useCallback(
+    async (id: string) => {
+      try {
+        const res = await fetch(`/api/chats/${id}`, { method: "DELETE" });
+        if (!res.ok && res.status !== 404) {
+          throw new Error(`Delete failed (${res.status})`);
+        }
+      } catch {
+        return;
+      }
+
+      const next = await refreshSessions();
+      if (conversationIdRef.current === id) {
+        if (next[0]) {
+          await loadSession(next[0].id);
+        } else {
+          setConversationId(undefined);
+          setMessages([]);
+          storeSessionId(undefined);
+        }
+      }
+    },
+    [loadSession, refreshSessions],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setSessionsLoading(true);
+      const list = await refreshSessions();
+      if (cancelled) return;
+
+      const stored = readStoredSessionId();
+      const target =
+        (stored && list.find((s) => s.id === stored)?.id) || list[0]?.id;
+
+      if (target) {
+        await loadSession(target);
+      } else {
+        setConversationId(undefined);
+        setMessages([]);
+      }
+
+      if (!cancelled) {
+        setSessionsLoading(false);
+        setBootstrapped(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSession, refreshSessions]);
+
   async function sendMessage() {
     const text = input.trim();
     if (!text || streaming) return;
+
+    let sessionId = conversationId;
+    if (!sessionId) {
+      sessionId = await createSession();
+      if (!sessionId) return;
+    }
 
     const userMsg: UiMessage = {
       id: `u-${Date.now()}`,
@@ -109,7 +287,7 @@ export function ChatTab() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: text,
-          conversation_id: conversationId,
+          conversation_id: sessionId,
           top_k: settings.top_k,
         }),
         signal: controller.signal,
@@ -185,6 +363,7 @@ export function ChatTab() {
                   : m,
               ),
             );
+            void refreshSessions();
           } else if (event.type === "error") {
             setMessages((prev) =>
               prev.map((m) =>
@@ -208,6 +387,7 @@ export function ChatTab() {
           m.id === assistantId ? { ...m, streaming: false } : m,
         ),
       );
+      void refreshSessions();
     } catch (err) {
       if ((err as Error).name === "AbortError") return;
       const message = err instanceof Error ? err.message : "Chat failed";
@@ -224,107 +404,188 @@ export function ChatTab() {
     }
   }
 
+  const activeTitle =
+    sessions.find((s) => s.id === conversationId)?.title || "New chat";
+
+  const historyProps = {
+    sessions,
+    activeId: conversationId,
+    loading: sessionsLoading,
+    creating,
+    onSelect: (id: string) => {
+      if (streaming || id === conversationId) {
+        setMobileOpen(false);
+        return;
+      }
+      void loadSession(id);
+    },
+    onNewChat: () => {
+      void createSession();
+    },
+    onDelete: (id: string) => {
+      void deleteSession(id);
+    },
+  };
+
   return (
-    <div className="flex h-full min-h-0 flex-col">
-      <ScrollArea className="min-h-0 flex-1 px-1">
-        <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-3 py-4">
-          {messages.length === 0 && (
-            <div className="flex flex-col items-center gap-3 py-16 text-center text-muted-foreground">
-              <div className="flex size-12 items-center justify-center rounded-2xl bg-muted">
-                <Sparkles className="size-6" />
-              </div>
-              <div>
-                <p className="text-base font-medium text-foreground">Ask your documents</p>
-                <p className="mt-1 text-sm">
-                  Upload files in File Manager, then ask questions with streaming answers and source badges.
-                </p>
-              </div>
-            </div>
-          )}
+    <div className="flex h-full min-h-0">
+      {/* Desktop history sidebar */}
+      <aside className="hidden w-64 shrink-0 border-r md:flex md:flex-col">
+        <ChatHistoryPanel {...historyProps} />
+      </aside>
 
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={cn(
-                "flex w-full",
-                msg.role === "user" ? "justify-end" : "justify-start",
-              )}
-            >
-              <div
-                className={cn(
-                  "max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm",
-                  msg.role === "user"
-                    ? "bg-blue-600 text-white"
-                    : "bg-muted/80 text-foreground ring-1 ring-border",
-                  msg.error && msg.role === "assistant" && "ring-destructive/40",
-                )}
-              >
-                <div className="whitespace-pre-wrap break-words">
-                  {msg.role === "assistant"
-                    ? renderMarkdownLite(msg.content || (msg.streaming ? "…" : ""))
-                    : msg.content}
-                  {msg.streaming && (
-                    <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-foreground/70 align-middle" />
-                  )}
-                </div>
+      {/* Mobile history drawer */}
+      <Sheet open={mobileOpen} onOpenChange={setMobileOpen}>
+        <SheetContent side="left" className="w-[min(100%,20rem)] p-0 sm:max-w-xs">
+          <SheetHeader className="sr-only">
+            <SheetTitle>Chat history</SheetTitle>
+          </SheetHeader>
+          <ChatHistoryPanel {...historyProps} className="h-full" />
+        </SheetContent>
+      </Sheet>
 
-                {msg.citations && msg.citations.length > 0 && (
-                  <div className="mt-3 flex flex-wrap gap-1.5 border-t border-border/60 pt-2">
-                    {msg.citations.map((c) => (
-                      <button
-                        key={c.chunk_id}
-                        type="button"
-                        title={c.content_preview?.slice(0, 150) || c.filename}
-                        onClick={() => setCitation(c)}
-                        className={cn(
-                          "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium transition hover:opacity-80",
-                          colorForFile(c.file_id),
-                        )}
-                      >
-                        {c.filename}
-                        {c.page_number != null ? ` · p.${c.page_number}` : ""}
-                        {typeof c.similarity_score === "number"
-                          ? ` · ${(c.similarity_score * 100).toFixed(0)}%`
-                          : ""}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-          <div ref={bottomRef} />
-        </div>
-      </ScrollArea>
-
-      <div className="border-t bg-background/95 p-3 backdrop-blur">
-        <div className="mx-auto flex w-full max-w-3xl gap-2">
-          <Textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask a question about your documents…"
-            rows={1}
-            disabled={streaming}
-            className="min-h-11 max-h-40 flex-1 resize-none"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void sendMessage();
-              }
-            }}
-          />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex items-center gap-2 border-b px-3 py-2">
           <Button
-            size="icon-lg"
-            disabled={!input.trim() || streaming}
-            onClick={() => void sendMessage()}
-            aria-label="Send"
+            type="button"
+            size="icon-sm"
+            variant="ghost"
+            className="md:hidden"
+            aria-label="Open chat history"
+            onClick={() => setMobileOpen(true)}
           >
-            {streaming ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
+            <PanelLeft className="size-4" />
+          </Button>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-medium">{activeTitle}</p>
+            <p className="truncate text-[11px] text-muted-foreground">
+              {bootstrapped
+                ? conversationId
+                  ? "Session saved locally"
+                  : "Start typing to create a session"
+                : "Restoring history…"}
+            </p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="hidden shrink-0 sm:inline-flex md:hidden"
+            disabled={creating}
+            onClick={() => void createSession()}
+          >
+            New chat
           </Button>
         </div>
-        <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-muted-foreground">
-          Enter to send · Shift+Enter for newline · Top-K {settings.top_k}
-        </p>
+
+        <ScrollArea className="min-h-0 flex-1 px-1">
+          <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-3 py-4">
+            {loadingThread && (
+              <div className="flex items-center justify-center gap-2 py-10 text-sm text-muted-foreground">
+                <Loader2 className="size-4 animate-spin" />
+                Loading conversation…
+              </div>
+            )}
+
+            {!loadingThread && messages.length === 0 && (
+              <div className="flex flex-col items-center gap-3 py-16 text-center text-muted-foreground">
+                <div className="flex size-12 items-center justify-center rounded-2xl bg-muted">
+                  <Sparkles className="size-6" />
+                </div>
+                <div>
+                  <p className="text-base font-medium text-foreground">Ask your documents</p>
+                  <p className="mt-1 text-sm">
+                    Upload files in File Manager, then ask questions with streaming answers and source badges.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {!loadingThread &&
+              messages.map((msg) => (
+                <div
+                  key={msg.id}
+                  className={cn(
+                    "flex w-full",
+                    msg.role === "user" ? "justify-end" : "justify-start",
+                  )}
+                >
+                  <div
+                    className={cn(
+                      "max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm",
+                      msg.role === "user"
+                        ? "bg-blue-600 text-white"
+                        : "bg-muted/80 text-foreground ring-1 ring-border",
+                      msg.error && msg.role === "assistant" && "ring-destructive/40",
+                    )}
+                  >
+                    <div className="whitespace-pre-wrap break-words">
+                      {msg.role === "assistant"
+                        ? renderMarkdownLite(msg.content || (msg.streaming ? "…" : ""))
+                        : msg.content}
+                      {msg.streaming && (
+                        <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-foreground/70 align-middle" />
+                      )}
+                    </div>
+
+                    {msg.citations && msg.citations.length > 0 && (
+                      <div className="mt-3 flex flex-wrap gap-1.5 border-t border-border/60 pt-2">
+                        {msg.citations.map((c) => (
+                          <button
+                            key={c.chunk_id}
+                            type="button"
+                            title={c.content_preview?.slice(0, 150) || c.filename}
+                            onClick={() => setCitation(c)}
+                            className={cn(
+                              "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium transition hover:opacity-80",
+                              colorForFile(c.file_id),
+                            )}
+                          >
+                            {c.filename}
+                            {c.page_number != null ? ` · p.${c.page_number}` : ""}
+                            {typeof c.similarity_score === "number"
+                              ? ` · ${(c.similarity_score * 100).toFixed(0)}%`
+                              : ""}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            <div ref={bottomRef} />
+          </div>
+        </ScrollArea>
+
+        <div className="border-t bg-background/95 p-3 backdrop-blur">
+          <div className="mx-auto flex w-full max-w-3xl gap-2">
+            <Textarea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Ask a question about your documents…"
+              rows={1}
+              disabled={streaming || loadingThread}
+              className="min-h-11 max-h-40 flex-1 resize-none"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void sendMessage();
+                }
+              }}
+            />
+            <Button
+              size="icon-lg"
+              disabled={!input.trim() || streaming || loadingThread}
+              onClick={() => void sendMessage()}
+              aria-label="Send"
+            >
+              {streaming ? <Loader2 className="animate-spin" /> : <SendHorizontal />}
+            </Button>
+          </div>
+          <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-muted-foreground">
+            Enter to send · Shift+Enter for newline · Top-K {settings.top_k}
+          </p>
+        </div>
       </div>
 
       <Dialog open={!!citation} onOpenChange={(open) => !open && setCitation(null)}>
