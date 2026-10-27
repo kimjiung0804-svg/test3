@@ -111,6 +111,8 @@ export function ChatTab() {
           message: text,
           conversation_id: conversationId,
           top_k: settings.top_k,
+          similarity_threshold: settings.similarity_threshold,
+          min_score: settings.similarity_threshold,
         }),
         signal: controller.signal,
       });
@@ -323,7 +325,8 @@ export function ChatTab() {
           </Button>
         </div>
         <p className="mx-auto mt-1.5 max-w-3xl px-1 text-[11px] text-muted-foreground">
-          Enter to send · Shift+Enter for newline · Top-K {settings.top_k}
+          Enter to send · Shift+Enter for newline · Top-K {settings.top_k} ·
+          minScore {settings.similarity_threshold.toFixed(2)}
         </p>
       </div>
 
