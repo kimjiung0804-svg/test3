@@ -102,6 +102,9 @@ export async function indexFileChunks(params: {
     start_char: number;
     end_char: number;
     page_number: number | null;
+    sheet_name?: string | null;
+    row_number?: number | null;
+    company_name?: string | null;
   }>;
   embeddings: Array<{ embedding: number[]; model: string }>;
 }): Promise<{ chunks_created: number; vectors: VectorRecord[] }> {
@@ -119,6 +122,9 @@ export async function indexFileChunks(params: {
     const emb = params.embeddings[i]!;
     const chunkId = randomUUID();
     const vectorId = randomUUID();
+    const sheet = slice.sheet_name ?? null;
+    const row = slice.row_number ?? null;
+    const companyName = slice.company_name ?? null;
 
     textChunks.push({
       id: chunkId,
@@ -128,6 +134,9 @@ export async function indexFileChunks(params: {
       start_char: slice.start_char,
       end_char: slice.end_char,
       page_number: slice.page_number,
+      sheet_name: sheet,
+      row_number: row,
+      company_name: companyName,
       created_at: now,
     });
 
@@ -141,8 +150,11 @@ export async function indexFileChunks(params: {
         filename: params.filename,
         chunk_sequence: slice.sequence_number,
         page_number: slice.page_number,
+        sheet,
+        row,
+        company_name: companyName,
         file_type: params.fileType,
-        content_preview: slice.content.slice(0, 100),
+        content_preview: slice.content.slice(0, 160),
       },
       indexed_at: now,
     });
@@ -193,22 +205,63 @@ function toInspectChunk(
   chunk: TextChunk | undefined,
   similarity?: number,
 ): VectorInspectChunk {
+  const sheet = chunk?.sheet_name ?? vector.metadata.sheet ?? null;
+  const row = chunk?.row_number ?? vector.metadata.row ?? null;
+  const companyName =
+    chunk?.company_name ?? vector.metadata.company_name ?? null;
+
   return {
     ...vector,
+    metadata: {
+      ...vector.metadata,
+      filename: vector.metadata.filename || store.filename,
+      sheet,
+      row,
+      company_name: companyName,
+    },
     content: chunk?.content ?? vector.metadata.content_preview,
     sequence_number:
       chunk?.sequence_number ?? vector.metadata.chunk_sequence,
     start_char: chunk?.start_char,
     end_char: chunk?.end_char,
     page_number: chunk?.page_number ?? vector.metadata.page_number,
+    sheet_name: sheet,
+    row_number: row,
+    company_name: companyName,
     similarity_score: similarity,
   };
+}
+
+function matchesContains(
+  chunk: VectorInspectChunk,
+  contains?: string,
+): boolean {
+  if (!contains?.trim()) return true;
+  const needles = contains
+    .split(/[\s,]+/)
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (needles.length === 0) return true;
+  const hay = [
+    chunk.content,
+    chunk.metadata.content_preview,
+    chunk.metadata.filename,
+    chunk.sheet_name ?? "",
+    chunk.company_name ?? "",
+    chunk.metadata.company_name ?? "",
+    String(chunk.row_number ?? ""),
+  ]
+    .join("\n")
+    .toLowerCase();
+  return needles.every((n) => hay.includes(n));
 }
 
 export async function listAllChunks(params?: {
   fileId?: string;
   page?: number;
   limit?: number;
+  /** Case-insensitive AND filter over content + XLSX metadata (e.g. "삼성전자 C100"). */
+  contains?: string;
 }): Promise<{
   chunks: VectorInspectChunk[];
   total: number;
@@ -225,7 +278,13 @@ export async function listAllChunks(params?: {
     if (!store) continue;
     const byChunk = new Map(store.chunks.map((c) => [c.id, c]));
     for (const vector of store.vectors) {
-      all.push(toInspectChunk(store, vector, byChunk.get(vector.chunk_id)));
+      const inspect = toInspectChunk(
+        store,
+        vector,
+        byChunk.get(vector.chunk_id),
+      );
+      if (!matchesContains(inspect, params?.contains)) continue;
+      all.push(inspect);
     }
   }
 

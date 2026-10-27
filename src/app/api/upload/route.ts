@@ -118,6 +118,9 @@ export async function POST(request: Request) {
     );
 
     const slices = chunkText(extracted.text, chunkOpts);
+    const sheetRowChunks = slices.filter(
+      (s) => s.sheet_name != null || s.row_number != null,
+    );
     const embeddings = await embedTexts(slices.map((s) => s.content));
     const { chunks_created } = await indexFileChunks({
       fileId,
@@ -129,6 +132,12 @@ export async function POST(request: Request) {
         model: e.model,
       })),
     });
+
+    if (fileType === "xlsx" || fileType === "xls") {
+      console.info(
+        `[index] xlsx vectordb: file=${filename} chunks=${chunks_created} with_sheet_or_row=${sheetRowChunks.length} strategy=${slices[0]?.chunk_strategy ?? "?"}`,
+      );
+    }
 
     const metadata: FileMetadata = {
       id: fileId,
@@ -143,7 +152,10 @@ export async function POST(request: Request) {
         chunk_size: chunkOpts.chunkSize,
         chunk_overlap: chunkOpts.chunkOverlap,
       },
-      metadata: extracted.metadata,
+      metadata: {
+        ...(extracted.metadata ?? {}),
+        chunk_strategy: slices[0]?.chunk_strategy ?? null,
+      },
     };
 
     await saveUploadedFile({
@@ -178,6 +190,9 @@ export async function POST(request: Request) {
       },
       embedding_model: embeddings[0]?.model ?? null,
       embedding_source: embeddings[0]?.source ?? null,
+      extract_metadata: extracted.metadata ?? null,
+      chunks_with_sheet_or_row: sheetRowChunks.length,
+      chunk_strategy: slices[0]?.chunk_strategy ?? null,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Upload failed";

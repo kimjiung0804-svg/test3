@@ -18,6 +18,8 @@ interface InspectBody {
   list_all?: boolean;
   page?: number;
   limit?: number;
+  /** Case-insensitive AND filter (e.g. "삼성전자 C100") over content + XLSX metadata. */
+  contains?: string;
 }
 
 export async function POST(request: Request) {
@@ -36,6 +38,10 @@ export async function POST(request: Request) {
       body.file_id && String(body.file_id).trim()
         ? String(body.file_id).trim()
         : undefined;
+    const contains =
+      body.contains && String(body.contains).trim()
+        ? String(body.contains).trim()
+        : undefined;
     const page = Math.max(1, Number(body.page) || 1);
     const limit = Math.max(1, Math.min(500, Number(body.limit) || 50));
     const topK = Math.max(1, Math.min(100, Number(body.top_k) || 10));
@@ -47,13 +53,15 @@ export async function POST(request: Request) {
         fileId,
         page,
         limit,
+        contains,
       });
 
       return NextResponse.json({
         chunks,
         total,
         query_embedding_generated: false,
-        search_mode: "list_all",
+        search_mode: contains ? "list_filtered" : "list_all",
+        contains: contains ?? null,
         stats,
         page,
         limit,
@@ -90,6 +98,7 @@ export async function GET(request: Request) {
     await ensureStorageDirs();
     const url = new URL(request.url);
     const fileId = url.searchParams.get("file_id") || undefined;
+    const contains = url.searchParams.get("contains") || undefined;
     const page = Math.max(1, Number(url.searchParams.get("page") ?? "1") || 1);
     const limit = Math.max(
       1,
@@ -97,13 +106,19 @@ export async function GET(request: Request) {
     );
 
     const stats = await getVectorStats();
-    const { chunks, total } = await listAllChunks({ fileId, page, limit });
+    const { chunks, total } = await listAllChunks({
+      fileId,
+      page,
+      limit,
+      contains,
+    });
 
     return NextResponse.json({
       chunks,
       total,
       query_embedding_generated: false,
-      search_mode: "list_all",
+      search_mode: contains ? "list_filtered" : "list_all",
+      contains: contains ?? null,
       stats,
       page,
       limit,

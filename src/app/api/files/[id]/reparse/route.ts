@@ -88,6 +88,9 @@ export async function POST(request: Request, context: RouteContext) {
     await saveExtractedText(id, extracted.text);
 
     const slices = chunkText(extracted.text, chunkOpts);
+    const sheetRowChunks = slices.filter(
+      (s) => s.sheet_name != null || s.row_number != null,
+    );
     const embeddings = await embedTexts(slices.map((s) => s.content));
     const { chunks_created } = await indexFileChunks({
       fileId: id,
@@ -100,6 +103,12 @@ export async function POST(request: Request, context: RouteContext) {
       })),
     });
 
+    if (meta.file_type === "xlsx" || meta.file_type === "xls") {
+      console.info(
+        `[reparse] xlsx vectordb: file=${meta.filename} chunks=${chunks_created} with_sheet_or_row=${sheetRowChunks.length} strategy=${slices[0]?.chunk_strategy ?? "?"}`,
+      );
+    }
+
     const updated = await updateFileMetadata(id, {
       chunks_count: chunks_created,
       indexed: chunks_created > 0,
@@ -111,6 +120,7 @@ export async function POST(request: Request, context: RouteContext) {
         ...(meta.metadata ?? {}),
         ...(extracted.metadata ?? {}),
         reparsed_at: new Date().toISOString(),
+        chunk_strategy: slices[0]?.chunk_strategy ?? null,
       },
     });
 
@@ -126,6 +136,8 @@ export async function POST(request: Request, context: RouteContext) {
         chunk_overlap: chunkOpts.chunkOverlap,
       },
       metadata: updated?.metadata ?? extracted.metadata,
+      chunks_with_sheet_or_row: sheetRowChunks.length,
+      chunk_strategy: slices[0]?.chunk_strategy ?? null,
       reparsed: true,
     });
   } catch (err) {

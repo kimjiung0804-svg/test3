@@ -26,6 +26,12 @@ export interface TextChunk {
   start_char: number;
   end_char: number;
   page_number: number | null;
+  /** XLSX sheet name when row-aware chunking applied. */
+  sheet_name?: string | null;
+  /** XLSX / tabular row index when row-aware chunking applied. */
+  row_number?: number | null;
+  /** 업체명 / company value when present in the row. */
+  company_name?: string | null;
   created_at: string;
 }
 
@@ -40,6 +46,12 @@ export interface VectorRecord {
     filename: string;
     chunk_sequence: number;
     page_number: number | null;
+    /** Alias used by Vector Inspector / RAG filters (XLSX). */
+    sheet: string | null;
+    /** Alias used by Vector Inspector / RAG filters (XLSX row). */
+    row: number | null;
+    /** 업체명 when parsed from row pairs. */
+    company_name: string | null;
     file_type: string;
     content_preview: string;
   };
@@ -53,6 +65,9 @@ export interface VectorInspectChunk extends VectorRecord {
   start_char?: number;
   end_char?: number;
   page_number: number | null;
+  sheet_name?: string | null;
+  row_number?: number | null;
+  company_name?: string | null;
   similarity_score?: number;
 }
 
