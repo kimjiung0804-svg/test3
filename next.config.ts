@@ -5,6 +5,7 @@ const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
   serverExternalPackages: ["pdf-parse", "mammoth", "xlsx"],
+  allowedDevOrigins: ["192.168.0.108", "localhost:3000"],
   turbopack: {
     rules: {
       "*.css": {
