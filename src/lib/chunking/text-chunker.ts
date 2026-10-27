@@ -87,7 +87,7 @@ export function chunkText(
   return chunks;
 }
 
-/** Best-effort page inference from form-feed or "# Page N" markers. */
+/** Best-effort page/sheet inference from form-feed, "# Page N", or "# Sheet:" markers. */
 function inferPageNumber(text: string, charOffset: number): number | null {
   const prefix = text.slice(0, charOffset + 1);
   const formFeeds = prefix.split("\f").length - 1;
@@ -99,6 +99,10 @@ function inferPageNumber(text: string, charOffset: number): number | null {
     const n = Number(last[1]);
     return Number.isFinite(n) ? n : null;
   }
+
+  // XLSX extracts use "# Sheet: Name" — map ordinal sheet index as page_number.
+  const sheetMarkers = [...prefix.matchAll(/(?:^|\n)\s*#\s*Sheet:\s*.+/gi)];
+  if (sheetMarkers.length > 0) return sheetMarkers.length;
 
   return null;
 }

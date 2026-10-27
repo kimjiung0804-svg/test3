@@ -85,6 +85,29 @@ export async function POST(request: Request) {
       return errorResponse(400, "parse_error", message);
     }
 
+    const textLength = extracted.text.trim().length;
+    if (textLength === 0) {
+      console.warn(
+        `[extract] empty text after parse: filename=${filename} type=${fileType} size=${buffer.byteLength}`,
+      );
+      return errorResponse(
+        400,
+        "empty_extract",
+        `No extractable text found in ${filename}. Re-check the file contents or format.`,
+      );
+    }
+
+    if (fileType === "xlsx" || fileType === "xls") {
+      const meta = extracted.metadata ?? {};
+      console.info(
+        `[extract] xlsx ok: filename=${filename} chars=${textLength} sheets=${meta.sheet_count ?? "?"} rows=${meta.data_row_count ?? "?"} cells=${meta.non_empty_cell_count ?? "?"}`,
+      );
+    } else {
+      console.info(
+        `[extract] ok: filename=${filename} type=${fileType} chars=${textLength}`,
+      );
+    }
+
     const fileId = randomUUID();
     const uploadedAt = new Date().toISOString();
     const storageRelative = path.join(
