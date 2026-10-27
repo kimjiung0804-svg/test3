@@ -20,6 +20,7 @@
       "runtime": "Next.js API Routes",
       "file_storage": "./storage/uploads",
       "vector_storage": "./storage/vectordb",
+      "chat_storage": "./storage/chats",
       "environment_config": ".env.local"
     },
     "integrations": {
@@ -269,8 +270,89 @@
         "Build RAG prompt: system instruction + retrieved chunks + user message",
         "Stream LLM response from LOCAL_LLM_BASE_URL",
         "Return citations (chunk IDs and metadata) with response",
-        "Save conversation turn to ChatMessage record"
+        "Save conversation turn to ChatMessage record under ./storage/chats/"
       ]
+    },
+    "/api/chats": {
+      "methods": ["GET", "POST"],
+      "description": "List and create locally persisted chat sessions",
+      "GET": {
+        "response": {
+          "chats": {
+            "type": "ChatSessionSummary[]",
+            "fields": ["id", "title", "created_at", "updated_at", "message_count"]
+          },
+          "total": "number"
+        }
+      },
+      "POST": {
+        "request": {
+          "content_type": "application/json",
+          "body": {
+            "title": {
+              "type": "string",
+              "required": false,
+              "description": "Optional session title (defaults to 'New chat')"
+            }
+          }
+        },
+        "response": {
+          "type": "ChatSession",
+          "status": 201
+        }
+      }
+    },
+    "/api/chats/[id]": {
+      "methods": ["GET", "PATCH", "DELETE"],
+      "description": "Read, update title, or delete a chat session including messages",
+      "GET": {
+        "response": { "type": "ChatSession" }
+      },
+      "PATCH": {
+        "request": {
+          "body": {
+            "title": { "type": "string", "required": true }
+          }
+        },
+        "response": { "type": "ChatSession" }
+      },
+      "DELETE": {
+        "response": {
+          "deleted": "boolean",
+          "id": "string (UUID)"
+        }
+      }
+    },
+    "/api/chats/[id]/messages": {
+      "methods": ["POST"],
+      "description": "Append a user/assistant/system message to a session (also auto-saved after /api/chat stream)",
+      "request": {
+        "content_type": "application/json",
+        "body": {
+          "role": {
+            "type": "string",
+            "enum": ["user", "assistant", "system"],
+            "required": true
+          },
+          "content": {
+            "type": "string",
+            "required": true
+          },
+          "citations": {
+            "type": "CitationData[]",
+            "required": false
+          },
+          "tokens_used": {
+            "type": "number | null",
+            "required": false
+          }
+        }
+      },
+      "response": {
+        "status": 201,
+        "message": "ChatMessage",
+        "chat": "ChatSession"
+      }
     }
   },
   "data_models": {
@@ -457,6 +539,33 @@
         "created_at": {
           "type": "string (ISO 8601)",
           "description": "Message timestamp"
+        }
+      }
+    },
+    "ChatSession": {
+      "description": "Locally persisted chat session under ./storage/chats/{id}.json",
+      "fields": {
+        "id": {
+          "type": "string (UUID)",
+          "primary_key": true,
+          "description": "Unique session identifier"
+        },
+        "title": {
+          "type": "string",
+          "required": true,
+          "description": "Display title (auto-set from first user message when default)"
+        },
+        "created_at": {
+          "type": "string (ISO 8601)",
+          "description": "Session creation timestamp"
+        },
+        "updated_at": {
+          "type": "string (ISO 8601)",
+          "description": "Last message or title update timestamp"
+        },
+        "messages": {
+          "type": "ChatMessage[]",
+          "description": "Ordered conversation turns"
         }
       }
     }
@@ -1129,6 +1238,21 @@
         "route": "/api/chat",
         "file": "app/api/chat/route.ts",
         "handler": "POST (streaming)"
+      },
+      {
+        "route": "/api/chats",
+        "file": "app/api/chats/route.ts",
+        "handlers": ["GET", "POST"]
+      },
+      {
+        "route": "/api/chats/[id]",
+        "file": "app/api/chats/[id]/route.ts",
+        "handlers": ["GET", "PATCH", "DELETE"]
+      },
+      {
+        "route": "/api/chats/[id]/messages",
+        "file": "app/api/chats/[id]/messages/route.ts",
+        "handler": "POST"
       }
     ],
     "shared_components": [
@@ -1203,6 +1327,11 @@
         "name": "fileStorage",
         "path": "lib/storage/file-storage.ts",
         "description": "File system operations for ./storage/uploads"
+      },
+      {
+        "name": "conversationStore",
+        "path": "lib/chat/conversation-store.ts",
+        "description": "Chat session CRUD persistence under ./storage/chats"
       }
     ]
   },
@@ -1227,6 +1356,11 @@
         "required": false,
         "default": "./storage/vectordb",
         "description": "Local directory for vector database"
+      },
+      "CHATS_PATH": {
+        "required": false,
+        "default": "./storage/chats",
+        "description": "Local directory for chat session JSON files"
       },
       "MAX_FILE_SIZE_MB": {
         "required": false,
@@ -1285,7 +1419,7 @@
     "phase_1_setup": [
       "Initialize Next.js project with TypeScript and App Router",
       "Install shadcn/ui and configure Tailwind CSS",
-      "Create ./storage/uploads and ./storage/vectordb directories",
+      "Create ./storage/uploads, ./storage/vectordb, and ./storage/chats directories",
       "Set up .env.local with LOCAL_LLM_BASE_URL and LOCAL_EMBEDDING_URL",
       "Add storage/ to .gitignore"
     ],
