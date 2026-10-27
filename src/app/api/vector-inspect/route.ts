@@ -4,8 +4,10 @@ import { embedText } from "@/lib/embedding/embedding-client";
 import {
   getVectorStats,
   listAllChunks,
-  similaritySearch,
+  similaritySearchDetailed,
 } from "@/lib/vector-db/vector-db";
+import { resolveMinScore } from "@/lib/vector-db/hybrid-score";
+import { DEFAULT_RAG_SETTINGS } from "@/lib/rag-settings";
 
 function errorResponse(status: number, error: string, message: string) {
   return NextResponse.json({ error, message }, { status });
@@ -15,9 +17,11 @@ interface InspectBody {
   query?: string;
   file_id?: string;
   top_k?: number;
-  /** Minimum cosine similarity; aligns with chat / Settings threshold. */
-  similarity_threshold?: number;
+  /** Relevance threshold / minScore (0–1). Default from RAG settings (0.5). */
   min_score?: number;
+  similarity_threshold?: number;
+  /** When true, include hits below threshold (separately). Default true for inspect. */
+  include_below_threshold?: boolean;
   list_all?: boolean;
   page?: number;
   limit?: number;
@@ -42,6 +46,14 @@ export async function POST(request: Request) {
     const page = Math.max(1, Number(body.page) || 1);
     const limit = Math.max(1, Math.min(500, Number(body.limit) || 50));
     const topK = Math.max(1, Math.min(100, Number(body.top_k) || 10));
+    const minScore = resolveMinScore(
+      body.min_score ?? body.similarity_threshold,
+      DEFAULT_RAG_SETTINGS.similarity_threshold,
+    );
+    const includeBelow =
+      body.include_below_threshold === undefined
+        ? true
+        : Boolean(body.include_below_threshold);
 
     const stats = await getVectorStats();
 
@@ -64,32 +76,31 @@ export async function POST(request: Request) {
     }
 
     const query = String(body.query).trim();
-    const thresholdRaw = Number(
-      body.similarity_threshold ?? body.min_score,
-    );
-    const minScore = Number.isFinite(thresholdRaw)
-      ? Math.min(1, Math.max(0, thresholdRaw))
-      : undefined;
-
     const embedded = await embedText(query);
-    const chunks = await similaritySearch({
+    const result = await similaritySearchDetailed({
       queryEmbedding: embedded.embedding,
+      queryText: query,
       fileId,
       topK,
       minScore,
+      includeBelowThreshold: includeBelow,
     });
 
     return NextResponse.json({
-      chunks,
-      total: chunks.length,
+      chunks: result.chunks,
+      below_threshold: result.below_threshold,
+      total: result.chunks.length,
+      below_threshold_total: result.below_threshold.length,
       query_embedding_generated: true,
-      search_mode: "similarity",
+      search_mode: "similarity_hybrid",
       stats,
       embedding_model: embedded.model,
       embedding_source: embedded.source,
-      top_k: topK,
-      similarity_threshold: minScore ?? null,
-      low_confidence: chunks.length === 0,
+      top_k: result.top_k,
+      min_score: result.min_score,
+      similarity_threshold: result.min_score,
+      hybrid_boost_applied: result.hybrid_boost_applied,
+      keyword_gate_applied: result.keyword_gate_applied,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Inspect failed";
