@@ -14,12 +14,19 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## XLSX extraction & re-indexing
 
-Excel files are parsed into sheet-scoped **header:value** rows (not raw CSV), so list-style workbooks (e.g. SEDEX participant sheets) embed with searchable field labels.
+Excel sheets are scanned for a header row (labels such as `No`, `업체명`, `부스위치`), then each data row is emitted as a self-contained **header:value** line (not raw CSV). Example:
 
-Preview extracted text:
+```text
+# Sheet: 참가사리스트
+# Headers (Excel row 1): No | 업체명 | 부스위치
+[Sheet: 참가사리스트] Row 298 | No: 298 | 업체명: 삼성전자 | 부스위치: C100
+```
+
+Preview (includes structured `rows` for row-level inspection; optional `?q=` filter):
 
 ```bash
-curl -s "http://localhost:3000/api/files/<file_id>/preview" | jq '.text_length, .text[:400]'
+curl -s "http://localhost:3000/api/files/<file_id>/preview?q=삼성전자" \
+  | jq '{text_length, row_count, rows: .rows[:3]}'
 ```
 
 After a parser fix, re-extract and re-index an already-uploaded file (keeps the same `file_id`):
@@ -31,5 +38,7 @@ curl -s -X POST "http://localhost:3000/api/files/<file_id>/reparse" \
 ```
 
 Optional body: `{ "chunk_size": 500, "chunk_overlap": 50 }`.
+
+Alternatively delete + re-upload via `DELETE /api/files?file_id=...` then `POST /api/upload`.
 
 Empty extracts are rejected on upload/reparse with `empty_extract` and logged as `[extract]` / `[reparse]`.

@@ -8,6 +8,25 @@ export interface ExtractResult {
   metadata?: Record<string, unknown>;
 }
 
+/** One self-contained spreadsheet data row (header:value pairs). */
+export interface SpreadsheetExtractedRow {
+  sheet: string;
+  /** 1-based Excel row number (including title/header rows above). */
+  row_index: number;
+  headers: string[];
+  fields: Record<string, string>;
+  /** Search/embed friendly line, e.g. `[Sheet: A] Row 298 | No: 298 | 업체명: 삼성전자` */
+  text: string;
+}
+
+export interface SpreadsheetSheetSummary {
+  name: string;
+  header_row_index: number;
+  headers: string[];
+  row_count: number;
+  non_empty_cells: number;
+}
+
 /** Extract raw text from PDF / DOCX / XLSX buffers. */
 export async function extractText(
   buffer: Buffer,
@@ -73,9 +92,137 @@ function normalizeHeader(raw: string, colIndex: number): string {
   return cleaned;
 }
 
+function isRowEmpty(row: unknown[] | undefined): boolean {
+  if (!row || row.length === 0) return true;
+  return !row.some((c) => cellToString(c).replace(/\s+/g, " ").trim());
+}
+
+/** Column labels commonly found in exhibitor / SEDEX-style sheets. */
+const HEADER_HINT_PATTERNS: RegExp[] = [
+  /^no\.?$/i,
+  /^번호$/,
+  /순번/,
+  /업체명/,
+  /회사명/,
+  /기업명/,
+  /상호/,
+  /부스위치/,
+  /부스\s*번호/,
+  /부스번호/,
+  /^부스$/,
+  /참가/,
+  /국가/,
+  /업종/,
+  /^name$/i,
+  /^company$/i,
+  /booth/i,
+  /^country$/i,
+];
+
+function scoreHeaderRow(cells: string[]): number {
+  const nonEmpty = cells.map((c) => c.replace(/\s+/g, " ").trim()).filter(Boolean);
+  if (nonEmpty.length < 2) return -10;
+
+  let score = 0;
+  for (const cell of nonEmpty) {
+    if (HEADER_HINT_PATTERNS.some((re) => re.test(cell))) score += 4;
+    // Short label-like cells look like headers
+    if (cell.length <= 24 && !/^\d+([.]\d+)?$/.test(cell)) score += 1;
+    // Long prose / title banners are unlikely column headers
+    if (cell.length > 40) score -= 3;
+  }
+
+  const numericRatio =
+    nonEmpty.filter((c) => /^\d+([.]\d+)?$/.test(c)).length / nonEmpty.length;
+  score -= numericRatio * 6;
+
+  return score;
+}
+
+/**
+ * Pick the header row within the first rows of a sheet.
+ * Prefers rows containing labels like No / 업체명 / 부스위치.
+ */
+function findHeaderRowIndex(matrix: unknown[][]): number {
+  const scanLimit = Math.min(matrix.length, 40);
+  let bestIdx = -1;
+  let bestScore = -Infinity;
+
+  for (let i = 0; i < scanLimit; i++) {
+    if (isRowEmpty(matrix[i])) continue;
+    const cells = (matrix[i] ?? []).map((c) => cellToString(c));
+    const score = scoreHeaderRow(cells);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+
+  if (bestIdx >= 0 && bestScore >= 3) return bestIdx;
+
+  // Fallback: first non-empty row
+  for (let i = 0; i < matrix.length; i++) {
+    if (!isRowEmpty(matrix[i])) return i;
+  }
+  return 0;
+}
+
+function formatRowText(
+  sheetName: string,
+  excelRowIndex: number,
+  pairs: string[],
+): string {
+  return `[Sheet: ${sheetName}] Row ${excelRowIndex} | ${pairs.join(" | ")}`;
+}
+
+/**
+ * Parse row lines emitted by extractXlsx back into structured rows
+ * (used by preview API for row-level inspection).
+ */
+export function parseSpreadsheetPreviewRows(
+  text: string,
+): SpreadsheetExtractedRow[] {
+  const rows: SpreadsheetExtractedRow[] = [];
+  const lineRe =
+    /^\[Sheet:\s*(.+?)\]\s*Row\s+(\d+)\s*\|\s*(.+)$/;
+
+  for (const block of text.split(/\n+/)) {
+    const line = block.trim();
+    if (!line) continue;
+    const m = line.match(lineRe);
+    if (!m) continue;
+
+    const sheet = m[1]!.trim();
+    const row_index = Number(m[2]);
+    const pairsRaw = m[3]!;
+    const fields: Record<string, string> = {};
+    const headers: string[] = [];
+
+    for (const part of pairsRaw.split(/\s*\|\s*/)) {
+      const idx = part.indexOf(":");
+      if (idx <= 0) continue;
+      const key = part.slice(0, idx).trim();
+      const value = part.slice(idx + 1).trim();
+      if (!key) continue;
+      headers.push(key);
+      fields[key] = value;
+    }
+
+    rows.push({
+      sheet,
+      row_index,
+      headers,
+      fields,
+      text: line,
+    });
+  }
+
+  return rows;
+}
+
 /**
  * Extract XLSX/XLS as embedding-friendly structured text:
- * sheet name + header:value pairs per data row (not raw CSV).
+ * detected header row + header:value pairs per data row (not raw CSV).
  */
 function extractXlsx(buffer: Buffer): ExtractResult {
   const workbook = XLSX.read(buffer, {
@@ -86,11 +233,8 @@ function extractXlsx(buffer: Buffer): ExtractResult {
   });
 
   const parts: string[] = [];
-  const sheetSummaries: Array<{
-    name: string;
-    row_count: number;
-    non_empty_cells: number;
-  }> = [];
+  const allRows: SpreadsheetExtractedRow[] = [];
+  const sheetSummaries: SpreadsheetSheetSummary[] = [];
   let totalRows = 0;
   let totalCells = 0;
 
@@ -100,35 +244,46 @@ function extractXlsx(buffer: Buffer): ExtractResult {
 
     parts.push(`# Sheet: ${sheetName}`);
 
-    // Array-of-arrays preserves column order; raw:false prefers formatted text.
+    // Keep blank rows so indices align with Excel 1-based row numbers.
     const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, {
       header: 1,
       defval: "",
       raw: false,
-      blankrows: false,
+      blankrows: true,
     });
 
-    if (!matrix.length) {
+    if (!matrix.length || matrix.every((r) => isRowEmpty(r))) {
       parts.push("(empty sheet)");
       sheetSummaries.push({
         name: sheetName,
+        header_row_index: 0,
+        headers: [],
         row_count: 0,
         non_empty_cells: 0,
       });
       continue;
     }
 
-    const headerCells = (matrix[0] ?? []).map((c) => cellToString(c));
-    const hasMultipleRows = matrix.length > 1;
+    const headerIdx = findHeaderRowIndex(matrix);
+    const headerCells = (matrix[headerIdx] ?? []).map((c) => cellToString(c));
     const headers = headerCells.map((h, i) => normalizeHeader(h, i));
+    const excelHeaderRow = headerIdx + 1;
+
+    parts.push(
+      `# Headers (Excel row ${excelHeaderRow}): ${headers.join(" | ")}`,
+    );
 
     let sheetRows = 0;
     let sheetCells = 0;
+    const dataStart = headerIdx + 1;
 
-    if (hasMultipleRows) {
-      for (let r = 1; r < matrix.length; r++) {
+    if (dataStart < matrix.length) {
+      for (let r = dataStart; r < matrix.length; r++) {
         const row = matrix[r] ?? [];
+        if (isRowEmpty(row)) continue;
+
         const pairs: string[] = [];
+        const fields: Record<string, string> = {};
         const width = Math.max(headers.length, row.length);
 
         for (let c = 0; c < width; c++) {
@@ -136,24 +291,46 @@ function extractXlsx(buffer: Buffer): ExtractResult {
           const value = cellToString(row[c]).replace(/\s+/g, " ").trim();
           if (!value) continue;
           pairs.push(`${header}: ${value}`);
+          fields[header] = value;
           sheetCells += 1;
         }
 
         if (pairs.length === 0) continue;
-        parts.push(`Row ${r}: ${pairs.join(" | ")}`);
+
+        const excelRow = r + 1;
+        const rowText = formatRowText(sheetName, excelRow, pairs);
+        parts.push(rowText);
+        allRows.push({
+          sheet: sheetName,
+          row_index: excelRow,
+          headers,
+          fields,
+          text: rowText,
+        });
         sheetRows += 1;
       }
     } else {
-      // Single row: treat cells as values (no header pairing) so content is not lost.
+      // Only a header-like row: emit it as values so content is not lost.
       const pairs: string[] = [];
+      const fields: Record<string, string> = {};
       for (let c = 0; c < headerCells.length; c++) {
         const value = headerCells[c]!.replace(/\s+/g, " ").trim();
         if (!value) continue;
-        pairs.push(`Column_${c + 1}: ${value}`);
+        const key = `Column_${c + 1}`;
+        pairs.push(`${key}: ${value}`);
+        fields[key] = value;
         sheetCells += 1;
       }
       if (pairs.length > 0) {
-        parts.push(`Row 1: ${pairs.join(" | ")}`);
+        const rowText = formatRowText(sheetName, excelHeaderRow, pairs);
+        parts.push(rowText);
+        allRows.push({
+          sheet: sheetName,
+          row_index: excelHeaderRow,
+          headers: Object.keys(fields),
+          fields,
+          text: rowText,
+        });
         sheetRows = 1;
       } else {
         parts.push("(empty sheet)");
@@ -161,18 +338,31 @@ function extractXlsx(buffer: Buffer): ExtractResult {
     }
 
     // Fallback: if header-row mode produced nothing, dump every non-empty cell.
-    if (sheetRows === 0 && matrix.length > 1) {
+    if (sheetRows === 0) {
       for (let r = 0; r < matrix.length; r++) {
         const row = matrix[r] ?? [];
+        if (isRowEmpty(row)) continue;
         const pairs: string[] = [];
+        const fields: Record<string, string> = {};
         for (let c = 0; c < row.length; c++) {
           const value = cellToString(row[c]).replace(/\s+/g, " ").trim();
           if (!value) continue;
-          pairs.push(`Column_${c + 1}: ${value}`);
+          const key = `Column_${c + 1}`;
+          pairs.push(`${key}: ${value}`);
+          fields[key] = value;
           sheetCells += 1;
         }
         if (pairs.length === 0) continue;
-        parts.push(`Row ${r + 1}: ${pairs.join(" | ")}`);
+        const excelRow = r + 1;
+        const rowText = formatRowText(sheetName, excelRow, pairs);
+        parts.push(rowText);
+        allRows.push({
+          sheet: sheetName,
+          row_index: excelRow,
+          headers: Object.keys(fields),
+          fields,
+          text: rowText,
+        });
         sheetRows += 1;
       }
     }
@@ -181,6 +371,8 @@ function extractXlsx(buffer: Buffer): ExtractResult {
     totalCells += sheetCells;
     sheetSummaries.push({
       name: sheetName,
+      header_row_index: excelHeaderRow,
+      headers,
       row_count: sheetRows,
       non_empty_cells: sheetCells,
     });
@@ -197,6 +389,13 @@ function extractXlsx(buffer: Buffer): ExtractResult {
       non_empty_cell_count: totalCells,
       sheets: sheetSummaries,
       extract_format: "header_row_pairs",
+      // Compact row list for preview / downstream chunkers (no duplicate text blob).
+      rows: allRows.map((r) => ({
+        sheet: r.sheet,
+        row_index: r.row_index,
+        fields: r.fields,
+        text: r.text,
+      })),
     },
   };
 }
