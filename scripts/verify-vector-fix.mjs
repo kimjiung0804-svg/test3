@@ -1,21 +1,26 @@
 /**
- * Offline verification for FIX_VECTOR: XLSX sheet/row chunk metadata + hybrid threshold.
+ * Offline verification for ALIGN_VECTOR: XLSX sheet/row chunk metadata +
+ * hybrid relevance threshold + filename keyword gate (SEDEX false-positive fix).
  * Run: node scripts/verify-vector-fix.mjs
  */
-import { createRequire } from "module";
 import path from "path";
 import { fileURLToPath } from "url";
-import { mkdir, writeFile, rm } from "fs/promises";
-import { pathToFileURL } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const root = path.resolve(__dirname, "..");
-
-// Compile-free: duplicate minimal logic mirrors by importing via dynamic ts? — use built JS via next not available.
-// Instead re-implement the assertions by spawning tsx if present, else inline the same algorithms.
 
 function tokenizeQuery(text) {
-  const STOPWORDS = new Set(["a", "an", "the", "and", "or", "list", "lists"]);
+  const STOPWORDS = new Set([
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "list",
+    "lists",
+    "관련",
+    "알려",
+    "주세요",
+  ]);
   const parts = text
     .toLowerCase()
     .split(/[^\p{L}\p{N}]+/u)
@@ -24,7 +29,13 @@ function tokenizeQuery(text) {
   return [...new Set(parts)];
 }
 
-function computeHybridScore({ query, filename, content, fileType, cosineSimilarity }) {
+function computeHybridScore({
+  query,
+  filename,
+  content,
+  fileType,
+  cosineSimilarity,
+}) {
   const tokens = tokenizeQuery(query);
   const filenameLower = filename.toLowerCase();
   const contentLower = content.toLowerCase();
@@ -34,25 +45,35 @@ function computeHybridScore({ query, filename, content, fileType, cosineSimilari
     if (filenameLower.includes(token)) matchedFilename.push(token);
     else if (contentLower.includes(token)) matchedContent.push(token);
   }
-  const filename_boost = Math.min(0.45, matchedFilename.length * 0.18);
-  const contentHitRatio = tokens.length === 0 ? 0 : matchedContent.length / tokens.length;
-  const content_boost = Math.min(0.2, contentHitRatio * 0.25);
+  const filename_boost = Math.min(0.5, matchedFilename.length * 0.2);
+  const contentHitRatio =
+    tokens.length === 0 ? 0 : matchedContent.length / tokens.length;
+  const content_boost = Math.min(0.22, contentHitRatio * 0.28);
   let typeBoost = 0;
-  const excelHint = /\b(xlsx|xls|excel|시트|참가사|명단|리스트|spreadsheet)\b/i;
+  const excelHint =
+    /\b(xlsx|xls|excel|sedex|시트|참가사|명단|리스트|spreadsheet)\b/i;
   const ft = (fileType || "").toLowerCase();
-  if (excelHint.test(query) && (ft === "xlsx" || ft === "xls")) typeBoost = 0.08;
-  if (tokens.length > 0 && matchedFilename.length === 0 && matchedContent.length === 0)
-    typeBoost -= 0.12;
+  if (excelHint.test(query) && (ft === "xlsx" || ft === "xls")) typeBoost = 0.1;
+  if (
+    tokens.length > 0 &&
+    matchedFilename.length === 0 &&
+    matchedContent.length === 0
+  ) {
+    typeBoost -= 0.18;
+  }
   return {
     final_score: cosineSimilarity + filename_boost + content_boost + typeBoost,
     matched_tokens: [...new Set([...matchedFilename, ...matchedContent])],
+    filename_hit: matchedFilename.length > 0,
   };
 }
 
 function inferLocationMeta(fullText, charOffset, chunkContent = "") {
   const prefix = fullText.slice(0, charOffset + 1);
   let sheet_name = null;
-  const sheetInChunk = [...chunkContent.matchAll(/(?:^|\n)\s*#\s*Sheet:\s*(.+)/gi)];
+  const sheetInChunk = [
+    ...chunkContent.matchAll(/(?:^|\n)\s*#\s*Sheet:\s*(.+)/gi),
+  ];
   if (sheetInChunk.length > 0) sheet_name = sheetInChunk[0][1].trim();
   else {
     const sheetBefore = [...prefix.matchAll(/(?:^|\n)\s*#\s*Sheet:\s*(.+)/gi)];
@@ -64,7 +85,8 @@ function inferLocationMeta(fullText, charOffset, chunkContent = "") {
   if (rowInChunk.length) row_number = Number(rowInChunk[0][1]);
   else {
     const rowBefore = [...prefix.matchAll(/(?:^|\n)\s*Row\s+(\d+)\s*:/gi)];
-    if (rowBefore.length) row_number = Number(rowBefore[rowBefore.length - 1][1]);
+    if (rowBefore.length)
+      row_number = Number(rowBefore[rowBefore.length - 1][1]);
   }
   return { sheet_name, row_number };
 }
@@ -88,6 +110,18 @@ function chunkText(text, { chunkSize = 500, chunkOverlap = 50 } = {}) {
     if (start >= end && end < normalized.length) start = end;
   }
   return chunks;
+}
+
+function applyKeywordGate(ranked) {
+  const hasFilenameHit = ranked.some((r) => r.filename_hit);
+  if (!hasFilenameHit) {
+    return { kept: ranked, gated: [], keyword_gate_applied: false };
+  }
+  return {
+    kept: ranked.filter((r) => (r.matched_tokens?.length ?? 0) > 0),
+    gated: ranked.filter((r) => (r.matched_tokens?.length ?? 0) === 0),
+    keyword_gate_applied: true,
+  };
 }
 
 // --- Tests ---
@@ -139,8 +173,16 @@ const unrelatedPdf = computeHybridScore({
   cosineSimilarity: 0.55,
 });
 
-console.log("SEDEX xlsx score:", sedexXlsx.final_score.toFixed(3), sedexXlsx.matched_tokens);
-console.log("unrelated PDF score:", unrelatedPdf.final_score.toFixed(3), unrelatedPdf.matched_tokens);
+console.log(
+  "SEDEX xlsx score:",
+  sedexXlsx.final_score.toFixed(3),
+  sedexXlsx.matched_tokens,
+);
+console.log(
+  "unrelated PDF score:",
+  unrelatedPdf.final_score.toFixed(3),
+  unrelatedPdf.matched_tokens,
+);
 
 const minScore = 0.5;
 const ranked = [
@@ -148,14 +190,21 @@ const ranked = [
   { name: "경기행복주택_안내.pdf", ...unrelatedPdf },
 ].sort((a, b) => b.final_score - a.final_score);
 
-const passed = ranked.filter((r) => r.final_score >= minScore);
+const gate = applyKeywordGate(ranked);
+const passed = gate.kept.filter((r) => r.final_score >= minScore);
+
 console.log(
   "ranked:",
   ranked.map((r) => `${r.name}=${r.final_score.toFixed(3)}`),
 );
+console.log("keyword_gate_applied:", gate.keyword_gate_applied);
 console.log(
-  "above threshold:",
+  "above threshold (after gate):",
   passed.map((r) => r.name),
+);
+console.log(
+  "gated out:",
+  gate.gated.map((r) => r.name),
 );
 
 if (ranked[0].name !== "SEDEX_참가사_리스트.xlsx") {
@@ -166,14 +215,27 @@ if (unrelatedPdf.final_score >= sedexXlsx.final_score) {
   console.error("FAIL: boost did not demote unrelated PDF relative to SEDEX");
   process.exit(1);
 }
-
-// Threshold separates weak PDF if cosine alone would have kept it
-if (unrelatedPdf.final_score < minScore && sedexXlsx.final_score >= minScore) {
-  console.log("threshold filter: PDF excluded, SEDEX kept (ideal)");
-} else {
-  console.log(
-    "threshold note: both or neither passed minScore — ranking boost still correct",
-  );
+if (!gate.keyword_gate_applied) {
+  console.error("FAIL: keyword gate should activate when filename hits exist");
+  process.exit(1);
+}
+if (gate.gated.some((r) => r.name.includes("SEDEX"))) {
+  console.error("FAIL: SEDEX must not be gated out");
+  process.exit(1);
+}
+if (!gate.gated.some((r) => r.name.includes("경기행복주택"))) {
+  console.error("FAIL: unrelated PDF should be keyword-gated out");
+  process.exit(1);
+}
+if (passed.some((r) => r.name.includes("경기행복주택"))) {
+  console.error("FAIL: unrelated PDF must not remain above threshold");
+  process.exit(1);
+}
+if (!passed.some((r) => r.name.includes("SEDEX"))) {
+  console.error("FAIL: SEDEX must remain above threshold");
+  process.exit(1);
 }
 
-console.log("OK: EVENT: FIX_VECTOR_COMPLETE verification passed");
+console.log("threshold filter: PDF excluded, SEDEX kept (ideal)");
+console.log("OK: EVENT: ALIGN_VECTOR_COMPLETE verification passed");
+console.log(`workdir=${path.resolve(__dirname, "..")}`);

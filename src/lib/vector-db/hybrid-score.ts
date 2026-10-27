@@ -89,13 +89,17 @@ export interface HybridBoostResult {
   filename_boost: number;
   content_boost: number;
   matched_tokens: string[];
+  /** True when at least one query token appears in the filename. */
+  filename_hit: boolean;
 }
 
-const FILENAME_BOOST_PER_HIT = 0.18;
-const FILENAME_BOOST_CAP = 0.45;
-const CONTENT_BOOST_CAP = 0.2;
+const FILENAME_BOOST_PER_HIT = 0.2;
+const FILENAME_BOOST_CAP = 0.5;
+const CONTENT_BOOST_CAP = 0.22;
+/** Demotion for zero keyword overlap — pulls pure-embedding false positives under 0.5. */
+const ZERO_MATCH_DEMOTION = 0.18;
 const EXCEL_QUERY_HINT =
-  /\b(xlsx|xls|excel|시트|참가사|명단|리스트|spreadsheet)\b/i;
+  /\b(xlsx|xls|excel|sedex|시트|참가사|명단|리스트|spreadsheet)\b/i;
 
 /**
  * Combine cosine similarity with filename/content keyword boosts.
@@ -123,13 +127,13 @@ export function computeHybridScore(input: HybridBoostInput): HybridBoostResult {
   // Content: fraction of query tokens found in chunk text
   const contentHitRatio =
     tokens.length === 0 ? 0 : matchedContent.length / tokens.length;
-  let content_boost = Math.min(CONTENT_BOOST_CAP, contentHitRatio * 0.25);
+  const content_boost = Math.min(CONTENT_BOOST_CAP, contentHitRatio * 0.28);
 
   // Mild type affinity when the query looks spreadsheet-related
   let typeBoost = 0;
   const ft = (input.fileType ?? "").toLowerCase();
   if (EXCEL_QUERY_HINT.test(input.query) && (ft === "xlsx" || ft === "xls")) {
-    typeBoost = 0.08;
+    typeBoost = 0.1;
   }
 
   // Soft demotion when the query has tokens but none appear in filename/content.
@@ -139,7 +143,7 @@ export function computeHybridScore(input: HybridBoostInput): HybridBoostResult {
     matchedFilename.length === 0 &&
     matchedContent.length === 0
   ) {
-    typeBoost -= 0.12;
+    typeBoost -= ZERO_MATCH_DEMOTION;
   }
 
   const matched_tokens = [...new Set([...matchedFilename, ...matchedContent])];
@@ -152,6 +156,7 @@ export function computeHybridScore(input: HybridBoostInput): HybridBoostResult {
     filename_boost: filename_boost + typeBoost,
     content_boost,
     matched_tokens,
+    filename_hit: matchedFilename.length > 0,
   };
 }
 

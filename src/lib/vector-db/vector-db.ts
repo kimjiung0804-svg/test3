@@ -303,6 +303,8 @@ export interface SimilaritySearchResult {
   min_score: number;
   top_k: number;
   hybrid_boost_applied: boolean;
+  /** True when zero-token hits were dropped because a filename keyword match existed. */
+  keyword_gate_applied: boolean;
 }
 
 export async function similaritySearch(
@@ -334,7 +336,7 @@ export async function similaritySearchDetailed(
   // Default 0 when omitted (backward compatible); API routes pass RAG threshold.
   const minScore = resolveMinScore(params.minScore, 0);
 
-  const scored: VectorInspectChunk[] = [];
+  const scored: Array<VectorInspectChunk & { _filename_hit?: boolean }> = [];
   for (const fileId of fileIds) {
     const store = await readFileStore(vectorDbPath, fileId);
     if (!store) continue;
@@ -348,6 +350,7 @@ export async function similaritySearchDetailed(
       const content = chunk?.content ?? vector.metadata.content_preview ?? "";
 
       let finalScore = cosine;
+      let filenameHit = false;
       let extras: Partial<
         Pick<
           VectorInspectChunk,
@@ -367,6 +370,7 @@ export async function similaritySearchDetailed(
           cosineSimilarity: cosine,
         });
         finalScore = hybrid.final_score;
+        filenameHit = hybrid.filename_hit;
         extras = {
           cosine_similarity: hybrid.cosine_similarity,
           filename_boost: hybrid.filename_boost,
@@ -375,31 +379,51 @@ export async function similaritySearchDetailed(
         };
       }
 
-      scored.push(
-        toInspectChunk(
-          store,
-          vector,
-          chunk,
-          finalScore,
-          extras,
-        ),
-      );
+      scored.push({
+        ...toInspectChunk(store, vector, chunk, finalScore, extras),
+        _filename_hit: filenameHit,
+      });
     }
   }
 
   scored.sort((a, b) => (b.similarity_score ?? 0) - (a.similarity_score ?? 0));
   const topK = Math.max(1, Math.min(100, params.topK ?? 10));
 
+  // Relative keyword gate: when some file's name matches query tokens
+  // (e.g. SEDEX_*.xlsx), drop zero-token hits so unrelated PDFs cannot
+  // occupy Top-K alone even if cosine was higher.
+  let keyword_gate_applied = false;
+  let candidates = scored;
+  let gatedOut: typeof scored = [];
+  if (useHybrid && scored.some((c) => c._filename_hit)) {
+    keyword_gate_applied = true;
+    candidates = scored.filter((c) => (c.matched_tokens?.length ?? 0) > 0);
+    gatedOut = scored.filter((c) => (c.matched_tokens?.length ?? 0) === 0);
+  }
+
+  const stripInternal = (
+    item: VectorInspectChunk & { _filename_hit?: boolean },
+  ): VectorInspectChunk => {
+    const { _filename_hit: _hit, ...clean } = item;
+    void _hit;
+    return clean;
+  };
+
   const passed: VectorInspectChunk[] = [];
   const below: VectorInspectChunk[] = [];
-  for (const item of scored) {
-    const score = item.similarity_score ?? 0;
+  for (const item of candidates) {
+    const clean = stripInternal(item);
+    const score = clean.similarity_score ?? 0;
     if (score >= minScore) {
-      passed.push({ ...item, below_threshold: false });
+      passed.push({ ...clean, below_threshold: false });
     } else {
-      below.push({ ...item, below_threshold: true });
+      below.push({ ...clean, below_threshold: true });
     }
   }
+  for (const item of gatedOut) {
+    below.push({ ...stripInternal(item), below_threshold: true });
+  }
+  below.sort((a, b) => (b.similarity_score ?? 0) - (a.similarity_score ?? 0));
 
   const chunks = passed.slice(0, topK);
   const below_threshold = params.includeBelowThreshold
@@ -412,6 +436,7 @@ export async function similaritySearchDetailed(
     min_score: minScore,
     top_k: topK,
     hybrid_boost_applied: useHybrid,
+    keyword_gate_applied,
   };
 }
 

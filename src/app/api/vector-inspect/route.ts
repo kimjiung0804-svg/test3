@@ -100,6 +100,7 @@ export async function POST(request: Request) {
       min_score: result.min_score,
       similarity_threshold: result.min_score,
       hybrid_boost_applied: result.hybrid_boost_applied,
+      keyword_gate_applied: result.keyword_gate_applied,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Inspect failed";
