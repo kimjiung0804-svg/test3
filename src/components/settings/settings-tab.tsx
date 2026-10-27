@@ -1,8 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { CheckCircle2, CircleAlert, Loader2, Wifi } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { useState } from "react";
+import { Loader2, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -11,87 +10,36 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
+import { LlmServerModelPicker } from "@/components/llm/llm-server-model-picker";
+import { useLlmSettings, type LlmPreset } from "@/hooks/use-llm-settings";
 import { useRagSettings } from "@/hooks/use-rag-settings";
 import { DEFAULT_RAG_SETTINGS } from "@/lib/rag-settings";
 
-type LlmStatus = "checking" | "ready" | "missing" | "error";
-
 export function SettingsTab() {
   const { settings, update, ready } = useRagSettings();
-  const [llmStatus, setLlmStatus] = useState<LlmStatus>("checking");
-  const [llmDetail, setLlmDetail] = useState("Checking API routes…");
+  const llm = useLlmSettings();
   const [savedFlash, setSavedFlash] = useState(false);
+  const [llmSavedFlash, setLlmSavedFlash] = useState(false);
+  const [llmError, setLlmError] = useState<string | null>(null);
+  const [draftPresets, setDraftPresets] = useState<LlmPreset[] | null>(null);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function probe() {
-      try {
-        const filesRes = await fetch("/api/files?limit=1");
-        if (!filesRes.ok) {
-          if (!cancelled) {
-            setLlmStatus("error");
-            setLlmDetail("Backend API not reachable");
-          }
-          return;
-        }
-
-        const chatRes = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: "" }),
-        });
-        const body = await chatRes.json().catch(() => ({}));
-
-        if (cancelled) return;
-
-        if (chatRes.status === 404) {
-          setLlmStatus("missing");
-          setLlmDetail("/api/chat not deployed yet — UI is bound and ready");
-          return;
-        }
-
-        if (
-          body.error === "llm_not_configured" ||
-          chatRes.status === 503
-        ) {
-          setLlmStatus("error");
-          setLlmDetail(
-            body.message ||
-              "Set LOCAL_LLM_BASE_URL in .env.local (OpenAI-compatible endpoint)",
-          );
-          return;
-        }
-
-        // empty message → invalid_request means route is live
-        if (body.error === "invalid_request" || chatRes.status === 400) {
-          setLlmStatus("ready");
-          setLlmDetail("Chat API reachable · LLM via LOCAL_LLM_BASE_URL");
-          return;
-        }
-
-        setLlmStatus("ready");
-        setLlmDetail("Chat API reachable");
-      } catch {
-        if (!cancelled) {
-          setLlmStatus("error");
-          setLlmDetail("Could not reach local APIs");
-        }
-      }
-    }
-    void probe();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const presets = draftPresets ?? llm.presets;
 
   function flashSaved() {
     setSavedFlash(true);
     window.setTimeout(() => setSavedFlash(false), 1500);
   }
 
-  if (!ready) {
+  function newPresetId() {
+    return typeof crypto !== "undefined" && crypto.randomUUID
+      ? crypto.randomUUID()
+      : `preset-${Date.now()}`;
+  }
+
+  if (!ready || !llm.ready) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
         <Loader2 className="size-5 animate-spin" />
@@ -104,41 +52,123 @@ export function SettingsTab() {
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
         <Card>
           <CardHeader>
-            <CardTitle>LLM connection</CardTitle>
+            <CardTitle>LLM servers &amp; models</CardTitle>
             <CardDescription>
-              Local OpenAI-compatible endpoint from{" "}
-              <code className="rounded bg-muted px-1">.env.local</code>
+              Bind to env defaults (
+              <code className="rounded bg-muted px-1">LOCAL_LLM_BASE_URL</code>
+              ), then override at runtime. Preset labels are free-form — never
+              hardcode server IPs in source.
             </CardDescription>
           </CardHeader>
-          <CardContent className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <Wifi className="size-4 text-muted-foreground" />
-              {llmStatus === "checking" && (
-                <Badge variant="outline">
-                  <Loader2 className="animate-spin" /> Checking
-                </Badge>
+          <CardContent className="space-y-4">
+            <LlmServerModelPicker
+              baseUrl={llm.baseUrl}
+              model={llm.model}
+              presets={presets}
+              onBaseUrlChange={(url) => llm.setLocal({ baseUrl: url })}
+              onModelChange={(model) => llm.setLocal({ model })}
+              onPersist={async () => {
+                setLlmError(null);
+                try {
+                  await llm.persist({
+                    baseUrl: llm.baseUrl,
+                    model: llm.model,
+                    presets,
+                  });
+                  setDraftPresets(null);
+                  setLlmSavedFlash(true);
+                  window.setTimeout(() => setLlmSavedFlash(false), 1500);
+                } catch (err) {
+                  setLlmError(
+                    err instanceof Error ? err.message : "Failed to save",
+                  );
+                }
+              }}
+            />
+
+            <div className="space-y-2 border-t pt-3">
+              <div className="flex items-center justify-between gap-2">
+                <Label>Server presets</Label>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    setDraftPresets([
+                      ...presets,
+                      {
+                        id: newPresetId(),
+                        label: `Server ${presets.length + 1}`,
+                        baseUrl: llm.baseUrl || llm.defaultBaseUrl,
+                      },
+                    ])
+                  }
+                >
+                  <Plus className="size-3.5" />
+                  Add slot
+                </Button>
+              </div>
+              {presets.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Optional named slots (label + URL you enter). Env default:{" "}
+                  {llm.envBaseUrl || llm.defaultBaseUrl}
+                </p>
               )}
-              {llmStatus === "ready" && (
-                <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
-                  <CheckCircle2 /> Connected
-                </Badge>
-              )}
-              {llmStatus === "missing" && (
-                <Badge variant="secondary">
-                  <CircleAlert /> Pending API
-                </Badge>
-              )}
-              {llmStatus === "error" && (
-                <Badge variant="destructive">
-                  <CircleAlert /> Attention
-                </Badge>
-              )}
+              {presets.map((p, idx) => (
+                <div key={p.id} className="flex flex-wrap items-end gap-2">
+                  <div className="min-w-[8rem] flex-1 space-y-1">
+                    <Label className="text-xs">Label</Label>
+                    <Input
+                      value={p.label}
+                      onChange={(e) => {
+                        const next = presets.map((x, i) =>
+                          i === idx ? { ...x, label: e.target.value } : x,
+                        );
+                        setDraftPresets(next);
+                      }}
+                      placeholder="e.g. Office GPU"
+                    />
+                  </div>
+                  <div className="min-w-[12rem] flex-[2] space-y-1">
+                    <Label className="text-xs">Base URL</Label>
+                    <Input
+                      value={p.baseUrl}
+                      onChange={(e) => {
+                        const next = presets.map((x, i) =>
+                          i === idx ? { ...x, baseUrl: e.target.value } : x,
+                        );
+                        setDraftPresets(next);
+                      }}
+                      placeholder="http://host:port/v1"
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    aria-label="Remove preset"
+                    onClick={() =>
+                      setDraftPresets(presets.filter((_, i) => i !== idx))
+                    }
+                  >
+                    <Trash2 className="size-4" />
+                  </Button>
+                </div>
+              ))}
             </div>
-            <p className="text-sm text-muted-foreground">{llmDetail}</p>
-            <p className="w-full text-xs text-muted-foreground">
-              Base URL is server-side only (
-              <code>LOCAL_LLM_BASE_URL</code>) — not exposed to the browser.
+
+            <p className="text-xs text-muted-foreground">
+              Effective source: <code>{llm.source}</code>
+              {llm.envModel ? ` · env model ${llm.envModel}` : ""}
             </p>
+            {llmSavedFlash && (
+              <p className="text-xs text-emerald-600">
+                {llm.apiAvailable
+                  ? "Saved to ./storage/llm-settings.json"
+                  : "Saved locally (API pending) — chat still sends baseUrl/model"}
+              </p>
+            )}
+            {llmError && <p className="text-xs text-destructive">{llmError}</p>}
           </CardContent>
         </Card>
 
@@ -170,13 +200,7 @@ export function SettingsTab() {
               onChange={(v) => update({ chunk_overlap: v })}
             />
             <div className="flex flex-wrap gap-2">
-              <Button
-                onClick={() => {
-                  flashSaved();
-                }}
-              >
-                Apply to new uploads
-              </Button>
+              <Button onClick={() => flashSaved()}>Apply to new uploads</Button>
               {savedFlash && (
                 <span className="self-center text-xs text-emerald-600">
                   Saved locally — used on next upload
@@ -190,7 +214,7 @@ export function SettingsTab() {
           <CardHeader>
             <CardTitle>RAG retrieval</CardTitle>
             <CardDescription>
-              Default Top-K for chat and vector search
+              Top-K and relevance threshold shared with Chat and Vector Inspector
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
@@ -204,13 +228,13 @@ export function SettingsTab() {
               onChange={(v) => update({ top_k: v })}
             />
             <SliderField
-              label="Similarity threshold"
+              label="Relevance threshold"
               value={settings.similarity_threshold}
               min={0}
               max={1}
               step={0.05}
               format={(v) => v.toFixed(2)}
-              description="UI preference for stricter relevance filtering."
+              description="min_score / similarity_threshold sent to chat and vector-inspect (scores below are excluded)."
               onChange={(v) => update({ similarity_threshold: v })}
             />
           </CardContent>
@@ -264,7 +288,13 @@ export function SettingsTab() {
               Vector DB: <code>VECTORDB_PATH</code> (default{" "}
               <code>./storage/vectordb</code>)
             </p>
-            <p>Secrets stay in <code>.env.local</code> — never shipped to the client.</p>
+            <p>
+              LLM settings: <code>./storage/llm-settings.json</code>
+            </p>
+            <p>
+              Secrets stay in <code>.env.local</code> — never shipped to the
+              client.
+            </p>
           </CardContent>
         </Card>
       </div>

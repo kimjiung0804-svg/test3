@@ -70,6 +70,8 @@ export function VectorTab() {
           page: pageNum,
           limit,
           top_k: topK,
+          min_score: settings.similarity_threshold,
+          similarity_threshold: settings.similarity_threshold,
         };
         if (query.trim() && !listAll) body.query = query.trim();
         if (fileId) body.file_id = fileId;
@@ -95,7 +97,7 @@ export function VectorTab() {
         setLoading(false);
       }
     },
-    [fileId, listAll, query, topK],
+    [fileId, listAll, query, settings.similarity_threshold, topK],
   );
 
   useEffect(() => {
