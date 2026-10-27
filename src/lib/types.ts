@@ -53,7 +53,15 @@ export interface VectorInspectChunk extends VectorRecord {
   start_char?: number;
   end_char?: number;
   page_number: number | null;
+  /** Ranking score after hybrid boost (or raw cosine when boost disabled). */
   similarity_score?: number;
+  /** Raw cosine similarity before keyword/filename boosts. */
+  cosine_similarity?: number;
+  filename_boost?: number;
+  content_boost?: number;
+  matched_tokens?: string[];
+  /** True when score fell below the configured relevance threshold. */
+  below_threshold?: boolean;
 }
 
 /** Source chunk metadata returned with RAG chat responses (spec CitationData). */

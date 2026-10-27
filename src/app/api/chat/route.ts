@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { ensureStorageDirs } from "@/lib/storage";
 import { embedText } from "@/lib/embedding/embedding-client";
-import { similaritySearch } from "@/lib/vector-db/vector-db";
+import { similaritySearchDetailed } from "@/lib/vector-db/vector-db";
+import { resolveMinScore } from "@/lib/vector-db/hybrid-score";
 import {
   LlmConfigError,
   LlmRequestError,
@@ -13,6 +14,7 @@ import {
 } from "@/lib/rag/rag-prompt";
 import { appendChatTurn } from "@/lib/chat/conversation-store";
 import type { ChatStreamEvent } from "@/lib/types";
+import { DEFAULT_RAG_SETTINGS } from "@/lib/rag-settings";
 
 interface ChatBody {
   message?: string;
@@ -20,6 +22,9 @@ interface ChatBody {
   /** Alias used by chat-history UI (same as conversation_id). */
   session_id?: string;
   top_k?: number;
+  /** Relevance threshold / minScore (0–1). */
+  min_score?: number;
+  similarity_threshold?: number;
   file_filter?: string[];
   /** Per-request OpenAI-compatible base URL (UI selector). Env is default only. */
   baseUrl?: string;
@@ -59,6 +64,10 @@ export async function POST(request: Request) {
     }
 
     const topK = Math.max(1, Math.min(50, Number(body.top_k) || 5));
+    const minScore = resolveMinScore(
+      body.min_score ?? body.similarity_threshold,
+      DEFAULT_RAG_SETTINGS.similarity_threshold,
+    );
     const fileFilter = Array.isArray(body.file_filter)
       ? body.file_filter.map(String).filter((id) => id.trim().length > 0)
       : undefined;
@@ -79,13 +88,17 @@ export async function POST(request: Request) {
         body.selected_model.trim()) ||
       undefined;
 
-    // 1) Embed query  2) Top-K similarity search
+    // 1) Embed query  2) Hybrid Top-K + relevance threshold
     const embedded = await embedText(message);
-    const chunks = await similaritySearch({
+    const retrieval = await similaritySearchDetailed({
       queryEmbedding: embedded.embedding,
+      queryText: message,
       fileIds: fileFilter,
       topK,
+      minScore,
+      includeBelowThreshold: false,
     });
+    const chunks = retrieval.chunks;
     const citations = chunksToCitations(chunks);
     const messages = buildRagMessages({ userMessage: message, chunks });
 

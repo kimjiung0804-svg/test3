@@ -21,8 +21,12 @@ import type { FileMetadata, VectorInspectChunk } from "@/lib/types";
 
 type InspectResponse = {
   chunks: VectorInspectChunk[];
+  below_threshold?: VectorInspectChunk[];
   total: number;
+  below_threshold_total?: number;
   search_mode: string;
+  min_score?: number;
+  hybrid_boost_applied?: boolean;
   stats?: {
     total_chunks?: number;
     total_files?: number;
@@ -39,8 +43,12 @@ export function VectorTab() {
   const [fileId, setFileId] = useState("");
   const [files, setFiles] = useState<FileMetadata[]>([]);
   const [chunks, setChunks] = useState<VectorInspectChunk[]>([]);
+  const [belowThreshold, setBelowThreshold] = useState<VectorInspectChunk[]>(
+    [],
+  );
   const [total, setTotal] = useState(0);
   const [mode, setMode] = useState("list_all");
+  const [minScoreApplied, setMinScoreApplied] = useState<number | null>(null);
   const [stats, setStats] = useState<InspectResponse["stats"]>();
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -70,6 +78,9 @@ export function VectorTab() {
           page: pageNum,
           limit,
           top_k: topK,
+          min_score: settings.similarity_threshold,
+          similarity_threshold: settings.similarity_threshold,
+          include_below_threshold: true,
         };
         if (query.trim() && !listAll) body.query = query.trim();
         if (fileId) body.file_id = fileId;
@@ -85,8 +96,12 @@ export function VectorTab() {
         }
         const data = (await res.json()) as InspectResponse;
         setChunks(data.chunks ?? []);
+        setBelowThreshold(data.below_threshold ?? []);
         setTotal(data.total ?? 0);
         setMode(data.search_mode);
+        setMinScoreApplied(
+          typeof data.min_score === "number" ? data.min_score : null,
+        );
         setStats(data.stats);
         setPage(data.page ?? pageNum);
       } catch (err) {
@@ -95,7 +110,7 @@ export function VectorTab() {
         setLoading(false);
       }
     },
-    [fileId, listAll, query, topK],
+    [fileId, listAll, query, settings.similarity_threshold, topK],
   );
 
   useEffect(() => {
@@ -116,7 +131,7 @@ export function VectorTab() {
     : chunks;
 
   const totalPages = Math.max(1, Math.ceil(total / limit));
-  const showSimilarity = mode === "similarity";
+  const showSimilarity = mode === "similarity" || mode === "similarity_hybrid";
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 p-4">
@@ -184,11 +199,21 @@ export function VectorTab() {
 
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
           <Badge variant="outline">mode: {mode}</Badge>
+          {minScoreApplied != null && (
+            <Badge variant="outline">
+              minScore {minScoreApplied.toFixed(2)}
+            </Badge>
+          )}
           {stats?.total_chunks != null && (
             <Badge variant="secondary">{stats.total_chunks} chunks in DB</Badge>
           )}
           {stats?.total_files != null && (
             <Badge variant="secondary">{stats.total_files} files</Badge>
+          )}
+          {belowThreshold.length > 0 && (
+            <Badge variant="destructive">
+              {belowThreshold.length} below threshold
+            </Badge>
           )}
           {error && <span className="text-destructive">{error}</span>}
         </div>
@@ -216,7 +241,7 @@ export function VectorTab() {
               <th className="px-3 py-2 font-medium">Page</th>
               <th className="px-3 py-2 font-medium">Preview</th>
               {showSimilarity && (
-                <th className="px-3 py-2 font-medium">Similarity</th>
+                <th className="px-3 py-2 font-medium">Score</th>
               )}
               <th className="px-3 py-2 font-medium">Actions</th>
             </tr>
@@ -317,6 +342,32 @@ export function VectorTab() {
               Next
             </Button>
           </div>
+        </div>
+      )}
+
+      {showSimilarity && belowThreshold.length > 0 && (
+        <div className="rounded-xl border border-dashed border-amber-300/60 bg-amber-50/40 p-3 dark:bg-amber-950/20">
+          <p className="mb-2 text-xs font-medium text-amber-800 dark:text-amber-200">
+            Below relevance threshold (excluded from RAG context)
+          </p>
+          <ul className="space-y-1 text-xs text-muted-foreground">
+            {belowThreshold.slice(0, 8).map((c) => (
+              <li key={c.chunk_id || c.id} className="flex flex-wrap gap-2">
+                <span className="font-medium text-foreground">
+                  {c.metadata?.filename}
+                </span>
+                <span className="tabular-nums">
+                  score{" "}
+                  {typeof c.similarity_score === "number"
+                    ? c.similarity_score.toFixed(3)
+                    : "—"}
+                </span>
+                {c.matched_tokens && c.matched_tokens.length > 0 && (
+                  <span>tokens: {c.matched_tokens.join(", ")}</span>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
