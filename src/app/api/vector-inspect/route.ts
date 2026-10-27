@@ -76,12 +76,6 @@ export async function POST(request: Request) {
     }
 
     const query = String(body.query).trim();
-    const thresholdRaw = Number(
-      body.similarity_threshold ?? body.min_score,
-    );
-    const minScore = Number.isFinite(thresholdRaw)
-      ? Math.min(1, Math.max(0, thresholdRaw))
-      : undefined;
 
     const embedded = await embedText(query);
     const result = await similaritySearchDetailed({

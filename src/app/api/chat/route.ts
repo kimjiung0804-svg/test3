@@ -16,7 +16,6 @@ import {
 import { appendChatTurn } from "@/lib/chat/conversation-store";
 import { DEFAULT_RAG_SETTINGS } from "@/lib/rag-settings";
 import type { ChatStreamEvent } from "@/lib/types";
-import { DEFAULT_RAG_SETTINGS } from "@/lib/rag-settings";
 
 interface ChatBody {
   message?: string;
@@ -26,6 +25,7 @@ interface ChatBody {
   top_k?: number;
   /** Relevance threshold / minScore (0–1). */
   min_score?: number;
+  /** Minimum similarity (0–1); aligns with Vector / Settings threshold. */
   similarity_threshold?: number;
   file_filter?: string[];
   /** Client-selected OpenAI-compatible base URL. */
@@ -34,8 +34,6 @@ interface ChatBody {
   /** Client-selected model id. */
   selected_model?: string;
   model?: string;
-  /** Minimum similarity (0–1); aligns with Vector / Settings threshold. */
-  similarity_threshold?: number;
   temperature?: number;
 }
 
@@ -88,11 +86,6 @@ export async function POST(request: Request) {
       (typeof body.session_id === "string" && body.session_id.trim()) ||
       undefined;
 
-    const thresholdRaw = Number(body.similarity_threshold);
-    const similarityThreshold = Number.isFinite(thresholdRaw)
-      ? Math.min(1, Math.max(0, thresholdRaw))
-      : DEFAULT_RAG_SETTINGS.similarity_threshold;
-
     const clientServerUrl = pickServerUrl(body);
     const clientModel = pickModel(body);
     const baseUrl = resolveLlmBaseUrl(clientServerUrl);
@@ -102,7 +95,7 @@ export async function POST(request: Request) {
         ? body.temperature
         : undefined;
 
-    // 1) Embed query  2) Hybrid Top-K + relevance threshold
+    // 1) Embed query  2) Hybrid Top-K (exact/keyword boost) + relevance threshold
     const embedded = await embedText(message);
     const retrieval = await similaritySearchDetailed({
       queryEmbedding: embedded.embedding,
@@ -113,6 +106,7 @@ export async function POST(request: Request) {
       includeBelowThreshold: false,
     });
     const chunks = retrieval.chunks;
+    const lowConfidence = chunks.length === 0;
     const citations = chunksToCitations(chunks);
     const messages = buildRagMessages({
       userMessage: message,

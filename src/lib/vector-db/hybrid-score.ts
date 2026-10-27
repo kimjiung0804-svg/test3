@@ -1,6 +1,7 @@
 /**
- * Hybrid retrieval helpers: keyword / filename boosting + threshold filtering.
- * Used by similarity search to reduce false positives (e.g. SEDEX query → unrelated PDF).
+ * Hybrid retrieval helpers: keyword / exact / filename boosting + threshold filtering.
+ * Lifts XLSX row chunks for entity queries (e.g. "삼성전자 부스 번호") and demotes
+ * unrelated PDFs that only matched on weak embedding cosine.
  */
 
 const STOPWORDS = new Set([
@@ -55,6 +56,13 @@ const STOPWORDS = new Set([
   "줘",
 ]);
 
+/** Field / booth style tokens — soft affinity toward spreadsheet rows. */
+const FIELD_QUERY_HINT =
+  /(부스|부스위치|부스번호|번호|업체명|회사명|참가사|명단|booth|company|vendor)/i;
+
+const EXCEL_QUERY_HINT =
+  /\b(xlsx|xls|excel|sedex|시트|참가사|명단|리스트|spreadsheet)\b/i;
+
 /** Tokenize query/content for keyword overlap (letters + numbers, incl. CJK runs). */
 export function tokenizeQuery(text: string): string[] {
   const lower = text.toLowerCase();
@@ -73,6 +81,18 @@ export function tokenizeQuery(text: string): string[] {
   return out;
 }
 
+/**
+ * Significant tokens for exact boosting — longer entity-like tokens get priority
+ * (company names, codes). Short field words still count but weigh less.
+ */
+export function significantTokens(tokens: string[]): string[] {
+  return tokens.filter((t) => {
+    if (t.length >= 3) return true;
+    // Alphanumeric booth codes like C100 / A12
+    return /[0-9]/.test(t);
+  });
+}
+
 export interface HybridBoostInput {
   query: string;
   filename: string;
@@ -83,40 +103,56 @@ export interface HybridBoostInput {
 }
 
 export interface HybridBoostResult {
-  /** Cosine + boosts, clamped to roughly [-0.2, 1.5] then usable for ranking. */
+  /** Cosine + boosts, usable for ranking against similarity_threshold. */
   final_score: number;
   cosine_similarity: number;
   filename_boost: number;
   content_boost: number;
+  exact_boost: number;
   matched_tokens: string[];
   /** True when at least one query token appears in the filename. */
   filename_hit: boolean;
+  /** True when a significant query token appears exactly in chunk content. */
+  exact_content_hit: boolean;
 }
 
 const FILENAME_BOOST_PER_HIT = 0.2;
 const FILENAME_BOOST_CAP = 0.5;
-const CONTENT_BOOST_CAP = 0.22;
+const CONTENT_RATIO_CAP = 0.18;
+/** Per-token exact substring hit in content (entity / company name). */
+const EXACT_BOOST_PER_HIT = 0.28;
+const EXACT_BOOST_CAP = 0.6;
+/** Extra lift when an exact hit lands in an XLSX/XLS row chunk. */
+const EXCEL_EXACT_BONUS = 0.18;
 /** Demotion for zero keyword overlap — pulls pure-embedding false positives under 0.5. */
-const ZERO_MATCH_DEMOTION = 0.18;
-const EXCEL_QUERY_HINT =
-  /\b(xlsx|xls|excel|sedex|시트|참가사|명단|리스트|spreadsheet)\b/i;
+const ZERO_MATCH_DEMOTION = 0.22;
 
 /**
- * Combine cosine similarity with filename/content keyword boosts.
- * Unrelated PDFs without query tokens in name/body stay near raw cosine;
- * SEDEX-matching XLSX filenames get a clear ranking lift.
+ * Combine cosine similarity with filename / content keyword and exact boosts.
+ * Unrelated PDFs without query tokens stay near (or below) raw cosine;
+ * XLSX rows containing the queried company name get a clear ranking lift.
  */
 export function computeHybridScore(input: HybridBoostInput): HybridBoostResult {
   const tokens = tokenizeQuery(input.query);
+  const sigTokens = significantTokens(tokens);
   const filenameLower = input.filename.toLowerCase();
   const contentLower = input.content.toLowerCase();
+  const ft = (input.fileType ?? "").toLowerCase();
+  const isExcel = ft === "xlsx" || ft === "xls";
 
   const matchedFilename: string[] = [];
   const matchedContent: string[] = [];
+  const exactContent: string[] = [];
 
   for (const token of tokens) {
-    if (filenameLower.includes(token)) matchedFilename.push(token);
-    else if (contentLower.includes(token)) matchedContent.push(token);
+    const inFile = filenameLower.includes(token);
+    const inContent = contentLower.includes(token);
+    if (inFile) matchedFilename.push(token);
+    if (inContent) matchedContent.push(token);
+  }
+
+  for (const token of sigTokens) {
+    if (contentLower.includes(token)) exactContent.push(token);
   }
 
   const filename_boost = Math.min(
@@ -124,20 +160,32 @@ export function computeHybridScore(input: HybridBoostInput): HybridBoostResult {
     matchedFilename.length * FILENAME_BOOST_PER_HIT,
   );
 
-  // Content: fraction of query tokens found in chunk text
+  // Soft content overlap (fraction of query tokens present)
   const contentHitRatio =
     tokens.length === 0 ? 0 : matchedContent.length / tokens.length;
-  const content_boost = Math.min(CONTENT_BOOST_CAP, contentHitRatio * 0.28);
+  const content_ratio_boost = Math.min(
+    CONTENT_RATIO_CAP,
+    contentHitRatio * 0.24,
+  );
 
-  // Mild type affinity when the query looks spreadsheet-related
+  // Strong exact boost: each significant token found verbatim in the chunk
+  let exact_boost = Math.min(
+    EXACT_BOOST_CAP,
+    exactContent.length * EXACT_BOOST_PER_HIT,
+  );
+  if (exactContent.length > 0 && isExcel) {
+    exact_boost += EXCEL_EXACT_BONUS;
+  }
+
   let typeBoost = 0;
-  const ft = (input.fileType ?? "").toLowerCase();
-  if (EXCEL_QUERY_HINT.test(input.query) && (ft === "xlsx" || ft === "xls")) {
-    typeBoost = 0.1;
+  if (
+    (EXCEL_QUERY_HINT.test(input.query) || FIELD_QUERY_HINT.test(input.query)) &&
+    isExcel
+  ) {
+    typeBoost += 0.1;
   }
 
   // Soft demotion when the query has tokens but none appear in filename/content.
-  // Pulls pure-embedding false positives (e.g. SEDEX query → unrelated PDF) under threshold.
   if (
     tokens.length > 0 &&
     matchedFilename.length === 0 &&
@@ -146,17 +194,25 @@ export function computeHybridScore(input: HybridBoostInput): HybridBoostResult {
     typeBoost -= ZERO_MATCH_DEMOTION;
   }
 
-  const matched_tokens = [...new Set([...matchedFilename, ...matchedContent])];
+  const content_boost = content_ratio_boost + exact_boost;
+  const matched_tokens = [
+    ...new Set([...matchedFilename, ...matchedContent]),
+  ];
   const final_score =
-    input.cosineSimilarity + filename_boost + content_boost + typeBoost;
+    input.cosineSimilarity +
+    filename_boost +
+    content_boost +
+    typeBoost;
 
   return {
     final_score,
     cosine_similarity: input.cosineSimilarity,
     filename_boost: filename_boost + typeBoost,
     content_boost,
+    exact_boost,
     matched_tokens,
     filename_hit: matchedFilename.length > 0,
+    exact_content_hit: exactContent.length > 0,
   };
 }
 

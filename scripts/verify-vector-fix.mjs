@@ -29,6 +29,10 @@ function tokenizeQuery(text) {
   return [...new Set(parts)];
 }
 
+function significantTokens(tokens) {
+  return tokens.filter((t) => t.length >= 3 || /[0-9]/.test(t));
+}
+
 function computeHybridScore({
   query,
   filename,
@@ -37,34 +41,48 @@ function computeHybridScore({
   cosineSimilarity,
 }) {
   const tokens = tokenizeQuery(query);
+  const sigTokens = significantTokens(tokens);
   const filenameLower = filename.toLowerCase();
   const contentLower = content.toLowerCase();
   const matchedFilename = [];
   const matchedContent = [];
+  const exactContent = [];
   for (const token of tokens) {
     if (filenameLower.includes(token)) matchedFilename.push(token);
-    else if (contentLower.includes(token)) matchedContent.push(token);
+    if (contentLower.includes(token)) matchedContent.push(token);
+  }
+  for (const token of sigTokens) {
+    if (contentLower.includes(token)) exactContent.push(token);
   }
   const filename_boost = Math.min(0.5, matchedFilename.length * 0.2);
   const contentHitRatio =
     tokens.length === 0 ? 0 : matchedContent.length / tokens.length;
-  const content_boost = Math.min(0.22, contentHitRatio * 0.28);
+  const content_ratio_boost = Math.min(0.18, contentHitRatio * 0.24);
+  let exact_boost = Math.min(0.6, exactContent.length * 0.28);
+  const ft = (fileType || "").toLowerCase();
+  const isExcel = ft === "xlsx" || ft === "xls";
+  if (exactContent.length > 0 && isExcel) exact_boost += 0.18;
   let typeBoost = 0;
   const excelHint =
     /\b(xlsx|xls|excel|sedex|시트|참가사|명단|리스트|spreadsheet)\b/i;
-  const ft = (fileType || "").toLowerCase();
-  if (excelHint.test(query) && (ft === "xlsx" || ft === "xls")) typeBoost = 0.1;
+  const fieldHint =
+    /(부스|부스위치|부스번호|번호|업체명|회사명|참가사|명단|booth|company|vendor)/i;
+  if ((excelHint.test(query) || fieldHint.test(query)) && isExcel) {
+    typeBoost += 0.1;
+  }
   if (
     tokens.length > 0 &&
     matchedFilename.length === 0 &&
     matchedContent.length === 0
   ) {
-    typeBoost -= 0.18;
+    typeBoost -= 0.22;
   }
+  const content_boost = content_ratio_boost + exact_boost;
   return {
     final_score: cosineSimilarity + filename_boost + content_boost + typeBoost,
     matched_tokens: [...new Set([...matchedFilename, ...matchedContent])],
     filename_hit: matchedFilename.length > 0,
+    exact_content_hit: exactContent.length > 0,
   };
 }
 
@@ -113,8 +131,10 @@ function chunkText(text, { chunkSize = 500, chunkOverlap = 50 } = {}) {
 }
 
 function applyKeywordGate(ranked) {
-  const hasFilenameHit = ranked.some((r) => r.filename_hit);
-  if (!hasFilenameHit) {
+  const hasStrong = ranked.some(
+    (r) => r.filename_hit || r.exact_content_hit,
+  );
+  if (!hasStrong) {
     return { kept: ranked, gated: [], keyword_gate_applied: false };
   }
   return {

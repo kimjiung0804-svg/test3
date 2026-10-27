@@ -4,6 +4,7 @@ const SYSTEM_INSTRUCTION = `You are a helpful assistant for a local document Q&A
 Answer ONLY using the provided context chunks from uploaded documents.
 If the context is insufficient, say you do not have enough information in the documents.
 Cite sources inline using [n] where n is the chunk number from the context.
+When a context block is an Excel/table row (header:value pairs), treat those fields as authoritative facts for that row.
 Keep answers concise and factual. Do not invent facts outside the context.`;
 
 const LOW_CONFIDENCE_INSTRUCTION = `You are a helpful assistant for a local document Q&A system.
@@ -31,6 +32,14 @@ export function chunksToCitations(
   }));
 }
 
+function looksLikeExcelRow(content: string): boolean {
+  return (
+    /(?:^|\n)\s*Row\s+\d+\s*:/i.test(content) ||
+    /(?:^|\n)\s*#\s*Sheet:/i.test(content) ||
+    /:\s*[^|\n]+(?:\s*\|\s*[^:\n]+:\s*[^|\n]+)+/.test(content)
+  );
+}
+
 /** Format retrieved chunks into a numbered context block for the LLM. */
 export function formatContextBlock(chunks: VectorInspectChunk[]): string {
   if (chunks.length === 0) {
@@ -42,17 +51,29 @@ export function formatContextBlock(chunks: VectorInspectChunk[]): string {
       const n = i + 1;
       const sheet = c.sheet_name ?? c.metadata.sheet;
       const row = c.row_number ?? c.metadata.row;
+      const fileType = (c.metadata.file_type ?? "").toLowerCase();
+      const isExcel =
+        fileType === "xlsx" ||
+        fileType === "xls" ||
+        looksLikeExcelRow(c.content);
+
       const locParts: string[] = [];
-      if (sheet) locParts.push(`sheet ${sheet}`);
-      if (row != null) locParts.push(`row ${row}`);
-      else if (c.page_number != null) locParts.push(`page ${c.page_number}`);
+      if (sheet) locParts.push(`sheet=${sheet}`);
+      if (row != null) locParts.push(`row=${row}`);
+      else if (c.page_number != null) locParts.push(`page=${c.page_number}`);
       const loc = locParts.length > 0 ? `, ${locParts.join(", ")}` : "";
       const score =
         c.similarity_score != null
           ? `, score=${c.similarity_score.toFixed(4)}`
           : "";
-      const header = `[${n}] ${c.metadata.filename}${loc}${score} (chunk_id=${c.chunk_id})`;
-      return `${header}\n${c.content}`;
+      const kind = isExcel ? ", excel_row (header:value)" : "";
+      const header = `[${n}] ${c.metadata.filename}${loc}${kind}${score} (chunk_id=${c.chunk_id})`;
+
+      const body = isExcel
+        ? `Selected spreadsheet row (use these header:value fields):\n${c.content}`
+        : c.content;
+
+      return `${header}\n${body}`;
     })
     .join("\n\n---\n\n");
 }

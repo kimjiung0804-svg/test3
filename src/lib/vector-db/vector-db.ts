@@ -303,7 +303,7 @@ export interface SimilaritySearchResult {
   min_score: number;
   top_k: number;
   hybrid_boost_applied: boolean;
-  /** True when zero-token hits were dropped because a filename keyword match existed. */
+  /** True when zero-token hits were dropped because a filename or exact content hit existed. */
   keyword_gate_applied: boolean;
 }
 
@@ -336,7 +336,12 @@ export async function similaritySearchDetailed(
   // Default 0 when omitted (backward compatible); API routes pass RAG threshold.
   const minScore = resolveMinScore(params.minScore, 0);
 
-  const scored: Array<VectorInspectChunk & { _filename_hit?: boolean }> = [];
+  const scored: Array<
+    VectorInspectChunk & {
+      _filename_hit?: boolean;
+      _exact_content_hit?: boolean;
+    }
+  > = [];
   for (const fileId of fileIds) {
     const store = await readFileStore(vectorDbPath, fileId);
     if (!store) continue;
@@ -351,6 +356,7 @@ export async function similaritySearchDetailed(
 
       let finalScore = cosine;
       let filenameHit = false;
+      let exactContentHit = false;
       let extras: Partial<
         Pick<
           VectorInspectChunk,
@@ -371,6 +377,7 @@ export async function similaritySearchDetailed(
         });
         finalScore = hybrid.final_score;
         filenameHit = hybrid.filename_hit;
+        exactContentHit = hybrid.exact_content_hit;
         extras = {
           cosine_similarity: hybrid.cosine_similarity,
           filename_boost: hybrid.filename_boost,
@@ -382,6 +389,7 @@ export async function similaritySearchDetailed(
       scored.push({
         ...toInspectChunk(store, vector, chunk, finalScore, extras),
         _filename_hit: filenameHit,
+        _exact_content_hit: exactContentHit,
       });
     }
   }
@@ -389,23 +397,34 @@ export async function similaritySearchDetailed(
   scored.sort((a, b) => (b.similarity_score ?? 0) - (a.similarity_score ?? 0));
   const topK = Math.max(1, Math.min(100, params.topK ?? 10));
 
-  // Relative keyword gate: when some file's name matches query tokens
-  // (e.g. SEDEX_*.xlsx), drop zero-token hits so unrelated PDFs cannot
-  // occupy Top-K alone even if cosine was higher.
+  // Relative keyword gate: when a filename OR exact content hit exists
+  // (e.g. SEDEX_*.xlsx, or a row containing "삼성전자"), drop zero-token
+  // hits so unrelated PDFs cannot occupy Top-K alone.
   let keyword_gate_applied = false;
   let candidates = scored;
   let gatedOut: typeof scored = [];
-  if (useHybrid && scored.some((c) => c._filename_hit)) {
+  const hasStrongKeywordHit = scored.some(
+    (c) => c._filename_hit || c._exact_content_hit,
+  );
+  if (useHybrid && hasStrongKeywordHit) {
     keyword_gate_applied = true;
     candidates = scored.filter((c) => (c.matched_tokens?.length ?? 0) > 0);
     gatedOut = scored.filter((c) => (c.matched_tokens?.length ?? 0) === 0);
   }
 
   const stripInternal = (
-    item: VectorInspectChunk & { _filename_hit?: boolean },
+    item: VectorInspectChunk & {
+      _filename_hit?: boolean;
+      _exact_content_hit?: boolean;
+    },
   ): VectorInspectChunk => {
-    const { _filename_hit: _hit, ...clean } = item;
+    const {
+      _filename_hit: _hit,
+      _exact_content_hit: _exact,
+      ...clean
+    } = item;
     void _hit;
+    void _exact;
     return clean;
   };
 
