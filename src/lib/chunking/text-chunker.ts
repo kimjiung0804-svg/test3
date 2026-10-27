@@ -4,6 +4,10 @@ export interface ChunkSlice {
   start_char: number;
   end_char: number;
   page_number: number | null;
+  /** XLSX sheet name inferred from `# Sheet:` markers. */
+  sheet_name: string | null;
+  /** XLSX/data row number inferred from `Row N:` markers. */
+  row_number: number | null;
 }
 
 export interface ChunkOptions {
@@ -36,6 +40,7 @@ export function resolveChunkOptions(
 /**
  * Split text into overlapping character windows.
  * Prefers breaking near whitespace near the window end when possible.
+ * Infers page / sheet / row metadata from extract markers.
  */
 export function chunkText(
   text: string,
@@ -66,12 +71,15 @@ export function chunkText(
 
     const content = normalized.slice(start, end);
     if (content.trim().length > 0) {
+      const loc = inferLocationMeta(normalized, start, content);
       chunks.push({
         content,
         sequence_number: sequence,
         start_char: start,
         end_char: end,
-        page_number: inferPageNumber(normalized, start),
+        page_number: loc.page_number,
+        sheet_name: loc.sheet_name,
+        row_number: loc.row_number,
       });
       sequence += 1;
     }
@@ -87,22 +95,85 @@ export function chunkText(
   return chunks;
 }
 
-/** Best-effort page/sheet inference from form-feed, "# Page N", or "# Sheet:" markers. */
-function inferPageNumber(text: string, charOffset: number): number | null {
-  const prefix = text.slice(0, charOffset + 1);
-  const formFeeds = prefix.split("\f").length - 1;
-  if (formFeeds > 0) return formFeeds + 1;
+export interface LocationMeta {
+  page_number: number | null;
+  sheet_name: string | null;
+  row_number: number | null;
+}
 
-  const pageMarkers = [...prefix.matchAll(/(?:^|\n)\s*(?:#\s*)?Page\s+(\d+)/gi)];
-  if (pageMarkers.length > 0) {
-    const last = pageMarkers[pageMarkers.length - 1];
-    const n = Number(last[1]);
-    return Number.isFinite(n) ? n : null;
+/**
+ * Infer page / sheet / row from form-feed, Page markers, and XLSX extract markers
+ * (`# Sheet: Name`, `Row N:`).
+ */
+export function inferLocationMeta(
+  fullText: string,
+  charOffset: number,
+  chunkContent?: string,
+): LocationMeta {
+  const prefix = fullText.slice(0, charOffset + 1);
+  const window = chunkContent ?? "";
+
+  let page_number: number | null = null;
+  const formFeeds = prefix.split("\f").length - 1;
+  if (formFeeds > 0) {
+    page_number = formFeeds + 1;
+  } else {
+    const pageMarkers = [
+      ...prefix.matchAll(/(?:^|\n)\s*(?:#\s*)?Page\s+(\d+)/gi),
+    ];
+    if (pageMarkers.length > 0) {
+      const last = pageMarkers[pageMarkers.length - 1];
+      const n = Number(last![1]);
+      page_number = Number.isFinite(n) ? n : null;
+    }
   }
 
-  // XLSX extracts use "# Sheet: Name" — map ordinal sheet index as page_number.
-  const sheetMarkers = [...prefix.matchAll(/(?:^|\n)\s*#\s*Sheet:\s*.+/gi)];
-  if (sheetMarkers.length > 0) return sheetMarkers.length;
+  // Sheet name: prefer marker inside the chunk, else last marker before offset.
+  let sheet_name: string | null = null;
+  const sheetInChunk = [
+    ...window.matchAll(/(?:^|\n)\s*#\s*Sheet:\s*(.+)/gi),
+  ];
+  if (sheetInChunk.length > 0) {
+    sheet_name = sheetInChunk[0]![1]!.trim() || null;
+  } else {
+    const sheetBefore = [
+      ...prefix.matchAll(/(?:^|\n)\s*#\s*Sheet:\s*(.+)/gi),
+    ];
+    if (sheetBefore.length > 0) {
+      sheet_name =
+        sheetBefore[sheetBefore.length - 1]![1]!.trim() || null;
+    }
+  }
 
-  return null;
+  // Row number: first Row N in chunk, else last Row N within the current sheet section.
+  let row_number: number | null = null;
+  const rowInChunk = [...window.matchAll(/(?:^|\n)\s*Row\s+(\d+)\s*:/gi)];
+  if (rowInChunk.length > 0) {
+    const n = Number(rowInChunk[0]![1]);
+    row_number = Number.isFinite(n) ? n : null;
+  } else {
+    const lastSheetIdx = Math.max(
+      prefix.lastIndexOf("\n# Sheet:"),
+      prefix.lastIndexOf("# Sheet:"),
+      0,
+    );
+    const sheetSection = prefix.slice(lastSheetIdx);
+    const rowBefore = [
+      ...sheetSection.matchAll(/(?:^|\n)\s*Row\s+(\d+)\s*:/gi),
+    ];
+    if (rowBefore.length > 0) {
+      const n = Number(rowBefore[rowBefore.length - 1]![1]);
+      row_number = Number.isFinite(n) ? n : null;
+    }
+  }
+
+  // When sheet markers exist but no PDF page, use 1-based sheet ordinal as page_number.
+  if (page_number == null && sheet_name != null) {
+    const sheetMarkers = [
+      ...prefix.matchAll(/(?:^|\n)\s*#\s*Sheet:\s*.+/gi),
+    ];
+    if (sheetMarkers.length > 0) page_number = sheetMarkers.length;
+  }
+
+  return { page_number, sheet_name, row_number };
 }

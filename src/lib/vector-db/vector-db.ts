@@ -4,6 +4,10 @@ import { randomUUID } from "crypto";
 import { ensureStorageDirs } from "@/lib/storage";
 import type { TextChunk, VectorRecord, VectorInspectChunk } from "@/lib/types";
 import { cosineSimilarity } from "@/lib/embedding/embedding-client";
+import {
+  computeHybridScore,
+  resolveMinScore,
+} from "@/lib/vector-db/hybrid-score";
 
 const FILE_STORE_DIR = "files";
 const CATALOG_FILENAME = "catalog.json";
@@ -102,6 +106,8 @@ export async function indexFileChunks(params: {
     start_char: number;
     end_char: number;
     page_number: number | null;
+    sheet_name?: string | null;
+    row_number?: number | null;
   }>;
   embeddings: Array<{ embedding: number[]; model: string }>;
 }): Promise<{ chunks_created: number; vectors: VectorRecord[] }> {
@@ -119,6 +125,8 @@ export async function indexFileChunks(params: {
     const emb = params.embeddings[i]!;
     const chunkId = randomUUID();
     const vectorId = randomUUID();
+    const sheet = slice.sheet_name ?? null;
+    const row = slice.row_number ?? null;
 
     textChunks.push({
       id: chunkId,
@@ -128,6 +136,8 @@ export async function indexFileChunks(params: {
       start_char: slice.start_char,
       end_char: slice.end_char,
       page_number: slice.page_number,
+      sheet_name: sheet,
+      row_number: row,
       created_at: now,
     });
 
@@ -141,6 +151,8 @@ export async function indexFileChunks(params: {
         filename: params.filename,
         chunk_sequence: slice.sequence_number,
         page_number: slice.page_number,
+        sheet,
+        row,
         file_type: params.fileType,
         content_preview: slice.content.slice(0, 100),
       },
@@ -192,16 +204,39 @@ function toInspectChunk(
   vector: VectorRecord,
   chunk: TextChunk | undefined,
   similarity?: number,
+  extras?: Partial<
+    Pick<
+      VectorInspectChunk,
+      | "cosine_similarity"
+      | "filename_boost"
+      | "content_boost"
+      | "matched_tokens"
+      | "below_threshold"
+    >
+  >,
 ): VectorInspectChunk {
+  const sheet =
+    chunk?.sheet_name ?? vector.metadata.sheet ?? null;
+  const row = chunk?.row_number ?? vector.metadata.row ?? null;
   return {
     ...vector,
+    metadata: {
+      ...vector.metadata,
+      sheet: vector.metadata.sheet ?? sheet,
+      row: vector.metadata.row ?? row,
+      filename: vector.metadata.filename || store.filename,
+      file_type: vector.metadata.file_type || store.file_type,
+    },
     content: chunk?.content ?? vector.metadata.content_preview,
     sequence_number:
       chunk?.sequence_number ?? vector.metadata.chunk_sequence,
     start_char: chunk?.start_char,
     end_char: chunk?.end_char,
     page_number: chunk?.page_number ?? vector.metadata.page_number,
+    sheet_name: sheet,
+    row_number: row,
     similarity_score: similarity,
+    ...extras,
   };
 }
 
@@ -242,13 +277,45 @@ export async function listAllChunks(params?: {
   return { chunks: all.slice(start, start + limit), total };
 }
 
-export async function similaritySearch(params: {
+export interface SimilaritySearchParams {
   queryEmbedding: number[];
+  /** Original query text — enables keyword / filename boosting. */
+  queryText?: string;
   fileId?: string;
   /** Limit search to one or more file IDs (chat `file_filter`). */
   fileIds?: string[];
   topK?: number;
-}): Promise<VectorInspectChunk[]> {
+  /**
+   * Minimum hybrid score to keep (relevance threshold / minScore).
+   * Default 0 when unset so callers that omit it stay backward-compatible;
+   * chat / vector-inspect pass settings.similarity_threshold (default 0.5).
+   */
+  minScore?: number;
+  /** When true, also return below-threshold hits (marked) for inspect UI. */
+  includeBelowThreshold?: boolean;
+  /** Disable keyword/filename boosts (pure cosine). Default: boost when queryText set. */
+  disableHybridBoost?: boolean;
+}
+
+export interface SimilaritySearchResult {
+  chunks: VectorInspectChunk[];
+  below_threshold: VectorInspectChunk[];
+  min_score: number;
+  top_k: number;
+  hybrid_boost_applied: boolean;
+}
+
+export async function similaritySearch(
+  params: SimilaritySearchParams,
+): Promise<VectorInspectChunk[]> {
+  const result = await similaritySearchDetailed(params);
+  return result.chunks;
+}
+
+/** Full retrieval result including threshold-filtered leftovers and score stats. */
+export async function similaritySearchDetailed(
+  params: SimilaritySearchParams,
+): Promise<SimilaritySearchResult> {
   const vectorDbPath = await ensureVectorDirs();
   const catalog = await readCatalog(vectorDbPath);
   const filterSet =
@@ -261,22 +328,91 @@ export async function similaritySearch(params: {
     ? catalog.files.filter((f) => filterSet.has(f.file_id)).map((f) => f.file_id)
     : catalog.files.map((f) => f.file_id);
 
+  const queryText = params.queryText?.trim() ?? "";
+  const useHybrid =
+    !params.disableHybridBoost && queryText.length > 0;
+  // Default 0 when omitted (backward compatible); API routes pass RAG threshold.
+  const minScore = resolveMinScore(params.minScore, 0);
+
   const scored: VectorInspectChunk[] = [];
   for (const fileId of fileIds) {
     const store = await readFileStore(vectorDbPath, fileId);
     if (!store) continue;
     const byChunk = new Map(store.chunks.map((c) => [c.id, c]));
     for (const vector of store.vectors) {
-      const score = cosineSimilarity(params.queryEmbedding, vector.embedding);
+      const cosine = cosineSimilarity(
+        params.queryEmbedding,
+        vector.embedding,
+      );
+      const chunk = byChunk.get(vector.chunk_id);
+      const content = chunk?.content ?? vector.metadata.content_preview ?? "";
+
+      let finalScore = cosine;
+      let extras: Partial<
+        Pick<
+          VectorInspectChunk,
+          | "cosine_similarity"
+          | "filename_boost"
+          | "content_boost"
+          | "matched_tokens"
+        >
+      > = { cosine_similarity: cosine };
+
+      if (useHybrid) {
+        const hybrid = computeHybridScore({
+          query: queryText,
+          filename: store.filename || vector.metadata.filename,
+          content,
+          fileType: store.file_type || vector.metadata.file_type,
+          cosineSimilarity: cosine,
+        });
+        finalScore = hybrid.final_score;
+        extras = {
+          cosine_similarity: hybrid.cosine_similarity,
+          filename_boost: hybrid.filename_boost,
+          content_boost: hybrid.content_boost,
+          matched_tokens: hybrid.matched_tokens,
+        };
+      }
+
       scored.push(
-        toInspectChunk(store, vector, byChunk.get(vector.chunk_id), score),
+        toInspectChunk(
+          store,
+          vector,
+          chunk,
+          finalScore,
+          extras,
+        ),
       );
     }
   }
 
   scored.sort((a, b) => (b.similarity_score ?? 0) - (a.similarity_score ?? 0));
   const topK = Math.max(1, Math.min(100, params.topK ?? 10));
-  return scored.slice(0, topK);
+
+  const passed: VectorInspectChunk[] = [];
+  const below: VectorInspectChunk[] = [];
+  for (const item of scored) {
+    const score = item.similarity_score ?? 0;
+    if (score >= minScore) {
+      passed.push({ ...item, below_threshold: false });
+    } else {
+      below.push({ ...item, below_threshold: true });
+    }
+  }
+
+  const chunks = passed.slice(0, topK);
+  const below_threshold = params.includeBelowThreshold
+    ? below.slice(0, topK)
+    : [];
+
+  return {
+    chunks,
+    below_threshold,
+    min_score: minScore,
+    top_k: topK,
+    hybrid_boost_applied: useHybrid,
+  };
 }
 
 export async function getVectorStats(): Promise<{
