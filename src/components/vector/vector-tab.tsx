@@ -133,6 +133,18 @@ export function VectorTab() {
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const showSimilarity = mode === "similarity" || mode === "similarity_hybrid";
 
+  function locLabel(chunk: VectorInspectChunk): string {
+    const sheet = chunk.sheet_name ?? chunk.metadata?.sheet;
+    const row = chunk.row_number ?? chunk.metadata?.row;
+    if (sheet != null || row != null) {
+      return [sheet ? `s:${sheet}` : null, row != null ? `r:${row}` : null]
+        .filter(Boolean)
+        .join(" ");
+    }
+    const page = chunk.page_number ?? chunk.metadata?.page_number;
+    return page != null ? String(page) : "—";
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 p-4">
       <div className="rounded-xl border bg-muted/20 p-4">
@@ -238,7 +250,7 @@ export function VectorTab() {
               <th className="px-3 py-2 font-medium">Chunk ID</th>
               <th className="px-3 py-2 font-medium">Source</th>
               <th className="px-3 py-2 font-medium">Seq</th>
-              <th className="px-3 py-2 font-medium">Page</th>
+              <th className="px-3 py-2 font-medium">Sheet/Row</th>
               <th className="px-3 py-2 font-medium">Preview</th>
               {showSimilarity && (
                 <th className="px-3 py-2 font-medium">Score</th>
@@ -275,8 +287,8 @@ export function VectorTab() {
                   <td className="px-3 py-2">
                     {chunk.sequence_number ?? chunk.metadata?.chunk_sequence ?? "—"}
                   </td>
-                  <td className="px-3 py-2">
-                    {chunk.page_number ?? chunk.metadata?.page_number ?? "—"}
+                  <td className="px-3 py-2 font-mono text-xs">
+                    {locLabel(chunk)}
                   </td>
                   <td className="max-w-xs truncate px-3 py-2 text-muted-foreground">
                     {(chunk.content || chunk.metadata?.content_preview || "").slice(0, 100)}
@@ -379,7 +391,7 @@ export function VectorTab() {
             </DialogTitle>
             <DialogDescription>
               {selected
-                ? `chunk ${shortId(selected.chunk_id || selected.id)} · seq ${selected.sequence_number ?? "—"}`
+                ? `chunk ${shortId(selected.chunk_id || selected.id)} · seq ${selected.sequence_number ?? "—"} · ${locLabel(selected)}`
                 : ""}
             </DialogDescription>
           </DialogHeader>

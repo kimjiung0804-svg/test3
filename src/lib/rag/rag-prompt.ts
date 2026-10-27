@@ -21,6 +21,8 @@ export function chunksToCitations(
     filename: c.metadata.filename,
     similarity_score: c.similarity_score ?? 0,
     page_number: c.page_number ?? c.metadata.page_number,
+    sheet: c.sheet_name ?? c.metadata.sheet ?? null,
+    row: c.row_number ?? c.metadata.row ?? null,
     content_preview: (c.content || c.metadata.content_preview || "").slice(
       0,
       200,
@@ -38,21 +40,18 @@ export function formatContextBlock(chunks: VectorInspectChunk[]): string {
   return chunks
     .map((c, i) => {
       const n = i + 1;
-      const page =
-        c.page_number != null ? `, page ${c.page_number}` : "";
+      const sheet = c.sheet_name ?? c.metadata.sheet;
+      const row = c.row_number ?? c.metadata.row;
+      const locParts: string[] = [];
+      if (sheet) locParts.push(`sheet ${sheet}`);
+      if (row != null) locParts.push(`row ${row}`);
+      else if (c.page_number != null) locParts.push(`page ${c.page_number}`);
+      const loc = locParts.length > 0 ? `, ${locParts.join(", ")}` : "";
       const score =
         c.similarity_score != null
-          ? `, similarity=${c.similarity_score.toFixed(4)}`
+          ? `, score=${c.similarity_score.toFixed(4)}`
           : "";
-      const metaBits = [
-        c.metadata.file_type ? `type=${c.metadata.file_type}` : null,
-        typeof (c.metadata as { sheet?: string }).sheet === "string"
-          ? `sheet=${(c.metadata as { sheet?: string }).sheet}`
-          : null,
-      ].filter(Boolean);
-      const meta =
-        metaBits.length > 0 ? `, ${metaBits.join(", ")}` : "";
-      const header = `[${n}] ${c.metadata.filename}${page}${score}${meta} (chunk_id=${c.chunk_id})`;
+      const header = `[${n}] ${c.metadata.filename}${loc}${score} (chunk_id=${c.chunk_id})`;
       return `${header}\n${c.content}`;
     })
     .join("\n\n---\n\n");

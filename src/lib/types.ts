@@ -26,6 +26,10 @@ export interface TextChunk {
   start_char: number;
   end_char: number;
   page_number: number | null;
+  /** XLSX sheet name when extract markers are present. */
+  sheet_name?: string | null;
+  /** XLSX / tabular row number when extract markers are present. */
+  row_number?: number | null;
   created_at: string;
 }
 
@@ -40,6 +44,10 @@ export interface VectorRecord {
     filename: string;
     chunk_sequence: number;
     page_number: number | null;
+    /** Alias used by Vector Inspector / RAG filters (XLSX). */
+    sheet: string | null;
+    /** Alias used by Vector Inspector / RAG filters (XLSX row). */
+    row: number | null;
     file_type: string;
     content_preview: string;
   };
@@ -53,6 +61,8 @@ export interface VectorInspectChunk extends VectorRecord {
   start_char?: number;
   end_char?: number;
   page_number: number | null;
+  sheet_name?: string | null;
+  row_number?: number | null;
   /** Ranking score after hybrid boost (or raw cosine when boost disabled). */
   similarity_score?: number;
   /** Raw cosine similarity before keyword/filename boosts. */
@@ -71,6 +81,8 @@ export interface CitationData {
   filename: string;
   similarity_score: number;
   page_number: number | null;
+  sheet?: string | null;
+  row?: number | null;
   content_preview?: string;
   sequence_number?: number;
 }

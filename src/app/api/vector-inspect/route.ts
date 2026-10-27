@@ -17,9 +17,11 @@ interface InspectBody {
   query?: string;
   file_id?: string;
   top_k?: number;
-  /** Minimum cosine similarity; aligns with chat / Settings threshold. */
-  similarity_threshold?: number;
+  /** Relevance threshold / minScore (0–1). Default from RAG settings (0.5). */
   min_score?: number;
+  similarity_threshold?: number;
+  /** When true, include hits below threshold (separately). Default true for inspect. */
+  include_below_threshold?: boolean;
   list_all?: boolean;
   page?: number;
   limit?: number;
@@ -88,6 +90,7 @@ export async function POST(request: Request) {
       fileId,
       topK,
       minScore,
+      includeBelowThreshold: includeBelow,
     });
 
     return NextResponse.json({
@@ -100,9 +103,11 @@ export async function POST(request: Request) {
       stats,
       embedding_model: embedded.model,
       embedding_source: embedded.source,
-      top_k: topK,
-      similarity_threshold: minScore ?? null,
-      low_confidence: chunks.length === 0,
+      top_k: result.top_k,
+      min_score: result.min_score,
+      similarity_threshold: result.min_score,
+      hybrid_boost_applied: result.hybrid_boost_applied,
+      keyword_gate_applied: result.keyword_gate_applied,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Inspect failed";

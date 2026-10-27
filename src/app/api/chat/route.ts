@@ -74,9 +74,10 @@ export async function POST(request: Request) {
       return errorResponse(400, "invalid_request", "Field 'message' is required");
     }
 
-    const topK = Math.max(
-      1,
-      Math.min(50, Number(body.top_k) || DEFAULT_RAG_SETTINGS.top_k),
+    const topK = Math.max(1, Math.min(50, Number(body.top_k) || 5));
+    const minScore = resolveMinScore(
+      body.min_score ?? body.similarity_threshold,
+      DEFAULT_RAG_SETTINGS.similarity_threshold,
     );
     const fileFilter = Array.isArray(body.file_filter)
       ? body.file_filter.map(String).filter((id) => id.trim().length > 0)
@@ -101,16 +102,17 @@ export async function POST(request: Request) {
         ? body.temperature
         : undefined;
 
-    // 1) Embed query  2) Top-K similarity search with relevance threshold
+    // 1) Embed query  2) Hybrid Top-K + relevance threshold
     const embedded = await embedText(message);
     const retrieval = await similaritySearchDetailed({
       queryEmbedding: embedded.embedding,
       queryText: message,
       fileIds: fileFilter,
       topK,
-      minScore: similarityThreshold,
+      minScore,
+      includeBelowThreshold: false,
     });
-    const lowConfidence = chunks.length === 0;
+    const chunks = retrieval.chunks;
     const citations = chunksToCitations(chunks);
     const messages = buildRagMessages({
       userMessage: message,
