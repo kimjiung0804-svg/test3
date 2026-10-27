@@ -1,0 +1,1313 @@
+{
+  "project": {
+    "name": "Multica_rag_doc_chat",
+    "description": "Local Document RAG & Vector Inspection System - 100% local environment for document parsing, embedding, and conversational RAG with local LLM integration",
+    "version": "1.0.0",
+    "type": "full-stack-web-application",
+    "framework": "Next.js 14+",
+    "runtime": "Node.js 18+"
+  },
+  "architecture": {
+    "frontend": {
+      "framework": "Next.js with App Router",
+      "ui_library": "React 18+",
+      "styling": "Tailwind CSS",
+      "component_library": "shadcn/ui",
+      "state_management": "React Context / Zustand",
+      "http_client": "fetch API / axios"
+    },
+    "backend": {
+      "runtime": "Next.js API Routes",
+      "file_storage": "./storage/uploads",
+      "vector_storage": "./storage/vectordb",
+      "environment_config": ".env.local"
+    },
+    "integrations": {
+      "llm_provider": {
+        "type": "Local LLM (Opencode)",
+        "base_url_env": "LOCAL_LLM_BASE_URL",
+        "description": "Uses process.env.LOCAL_LLM_BASE_URL for LLM endpoint"
+      },
+      "embedding_provider": {
+        "type": "Local Embedding Service",
+        "base_url_env": "LOCAL_EMBEDDING_URL"
+      },
+      "vector_database": {
+        "type": "Local Vector DB",
+        "storage_path": "./storage/vectordb"
+      }
+    }
+  },
+  "api_routes": {
+    "/api/upload": {
+      "method": "POST",
+      "description": "Upload document files (PDF, Word, Excel), parse content, chunk text, generate embeddings, and store in vector DB",
+      "request": {
+        "content_type": "multipart/form-data",
+        "fields": {
+          "file": {
+            "type": "File",
+            "required": true,
+            "accepted_formats": [".pdf", ".docx", ".doc", ".xlsx", ".xls"]
+          },
+          "chunk_size": {
+            "type": "number",
+            "required": false,
+            "default": 500,
+            "description": "Number of characters per text chunk"
+          },
+          "chunk_overlap": {
+            "type": "number",
+            "required": false,
+            "default": 50,
+            "description": "Number of overlapping characters between chunks"
+          }
+        }
+      },
+      "response": {
+        "success": {
+          "status": 200,
+          "body": {
+            "file_id": "string (UUID)",
+            "filename": "string",
+            "size": "number (bytes)",
+            "chunks_created": "number",
+            "indexed_at": "string (ISO 8601 timestamp)"
+          }
+        },
+        "error": {
+          "status": "400 | 500",
+          "body": {
+            "error": "string",
+            "message": "string"
+          }
+        }
+      },
+      "processing_steps": [
+        "Validate file type and size",
+        "Save file to ./storage/uploads/{file_id}/original",
+        "Parse document content using appropriate parser (pdf-parse, mammoth, xlsx)",
+        "Split text into chunks based on chunk_size and chunk_overlap",
+        "Generate embeddings for each chunk via LOCAL_EMBEDDING_URL",
+        "Store chunks and embeddings in vector DB",
+        "Save metadata to FileMetadata record"
+      ]
+    },
+    "/api/files": {
+      "GET": {
+        "method": "GET",
+        "description": "List all uploaded files with metadata",
+        "query_parameters": {
+          "page": {
+            "type": "number",
+            "required": false,
+            "default": 1
+          },
+          "limit": {
+            "type": "number",
+            "required": false,
+            "default": 20
+          },
+          "sort_by": {
+            "type": "string",
+            "required": false,
+            "default": "uploaded_at",
+            "enum": ["uploaded_at", "filename", "size"]
+          },
+          "order": {
+            "type": "string",
+            "required": false,
+            "default": "desc",
+            "enum": ["asc", "desc"]
+          }
+        },
+        "response": {
+          "status": 200,
+          "body": {
+            "files": "FileMetadata[]",
+            "total": "number",
+            "page": "number",
+            "limit": "number"
+          }
+        }
+      },
+      "DELETE": {
+        "method": "DELETE",
+        "description": "Delete a specific file and its associated chunks/embeddings",
+        "query_parameters": {
+          "file_id": {
+            "type": "string (UUID)",
+            "required": true
+          }
+        },
+        "response": {
+          "success": {
+            "status": 200,
+            "body": {
+              "deleted": "boolean",
+              "file_id": "string",
+              "chunks_removed": "number"
+            }
+          },
+          "error": {
+            "status": "404 | 500",
+            "body": {
+              "error": "string",
+              "message": "string"
+            }
+          }
+        },
+        "processing_steps": [
+          "Validate file_id exists",
+          "Delete all vector DB records associated with file_id",
+          "Remove physical file from ./storage/uploads/{file_id}/",
+          "Remove FileMetadata record",
+          "Return deletion confirmation"
+        ]
+      }
+    },
+    "/api/vector-inspect": {
+      "method": "POST",
+      "description": "Search and inspect vector DB chunks with similarity search",
+      "request": {
+        "content_type": "application/json",
+        "body": {
+          "query": {
+            "type": "string",
+            "required": false,
+            "description": "Search query text for semantic similarity search"
+          },
+          "file_id": {
+            "type": "string (UUID)",
+            "required": false,
+            "description": "Filter chunks by specific file"
+          },
+          "top_k": {
+            "type": "number",
+            "required": false,
+            "default": 10,
+            "description": "Number of most similar chunks to return"
+          },
+          "list_all": {
+            "type": "boolean",
+            "required": false,
+            "default": false,
+            "description": "If true, list all chunks without similarity search"
+          },
+          "page": {
+            "type": "number",
+            "required": false,
+            "default": 1
+          },
+          "limit": {
+            "type": "number",
+            "required": false,
+            "default": 50
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "body": {
+          "chunks": "VectorRecord[]",
+          "total": "number",
+          "query_embedding_generated": "boolean",
+          "search_mode": "string (similarity | list_all)"
+        }
+      }
+    },
+    "/api/chat": {
+      "method": "POST",
+      "description": "RAG-powered conversational interface - retrieves relevant chunks and streams LLM response",
+      "request": {
+        "content_type": "application/json",
+        "body": {
+          "message": {
+            "type": "string",
+            "required": true,
+            "description": "User's chat message"
+          },
+          "conversation_id": {
+            "type": "string (UUID)",
+            "required": false,
+            "description": "Conversation session ID for context continuity"
+          },
+          "top_k": {
+            "type": "number",
+            "required": false,
+            "default": 5,
+            "description": "Number of relevant chunks to retrieve for RAG context"
+          },
+          "file_filter": {
+            "type": "string[] (UUIDs)",
+            "required": false,
+            "description": "Limit search to specific files"
+          }
+        }
+      },
+      "response": {
+        "content_type": "text/event-stream",
+        "stream_events": {
+          "data": {
+            "type": "ChatStreamChunk",
+            "description": "Streamed text tokens from LLM"
+          },
+          "citations": {
+            "type": "CitationData[]",
+            "description": "Source chunks used for RAG context"
+          },
+          "done": {
+            "type": "boolean",
+            "description": "Indicates stream completion"
+          }
+        }
+      },
+      "processing_steps": [
+        "Receive user message",
+        "Generate embedding for user query via LOCAL_EMBEDDING_URL",
+        "Perform similarity search in vector DB (top_k chunks)",
+        "Build RAG prompt: system instruction + retrieved chunks + user message",
+        "Stream LLM response from LOCAL_LLM_BASE_URL",
+        "Return citations (chunk IDs and metadata) with response",
+        "Save conversation turn to ChatMessage record"
+      ]
+    }
+  },
+  "data_models": {
+    "FileMetadata": {
+      "description": "Metadata for uploaded documents",
+      "fields": {
+        "id": {
+          "type": "string (UUID)",
+          "primary_key": true,
+          "description": "Unique file identifier"
+        },
+        "filename": {
+          "type": "string",
+          "required": true,
+          "description": "Original filename with extension"
+        },
+        "file_type": {
+          "type": "string",
+          "enum": ["pdf", "docx", "doc", "xlsx", "xls"],
+          "required": true
+        },
+        "size": {
+          "type": "number",
+          "description": "File size in bytes"
+        },
+        "storage_path": {
+          "type": "string",
+          "description": "Relative path in ./storage/uploads/"
+        },
+        "uploaded_at": {
+          "type": "string (ISO 8601)",
+          "description": "Upload timestamp"
+        },
+        "chunks_count": {
+          "type": "number",
+          "description": "Number of text chunks created from this file"
+        },
+        "indexed": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether embeddings have been generated and stored"
+        },
+        "chunk_config": {
+          "type": "object",
+          "fields": {
+            "chunk_size": "number",
+            "chunk_overlap": "number"
+          }
+        },
+        "metadata": {
+          "type": "object",
+          "description": "Additional document metadata (author, page count, etc.)"
+        }
+      }
+    },
+    "TextChunk": {
+      "description": "Individual text segment from a document",
+      "fields": {
+        "id": {
+          "type": "string (UUID)",
+          "primary_key": true,
+          "description": "Unique chunk identifier"
+        },
+        "file_id": {
+          "type": "string (UUID)",
+          "foreign_key": "FileMetadata.id",
+          "required": true,
+          "description": "Reference to parent file"
+        },
+        "content": {
+          "type": "string",
+          "required": true,
+          "description": "Text content of the chunk"
+        },
+        "sequence_number": {
+          "type": "number",
+          "required": true,
+          "description": "Order position in original document (0-indexed)"
+        },
+        "start_char": {
+          "type": "number",
+          "description": "Starting character position in original text"
+        },
+        "end_char": {
+          "type": "number",
+          "description": "Ending character position in original text"
+        },
+        "page_number": {
+          "type": "number",
+          "nullable": true,
+          "description": "Source page number (if applicable)"
+        },
+        "created_at": {
+          "type": "string (ISO 8601)",
+          "description": "Chunk creation timestamp"
+        }
+      }
+    },
+    "VectorRecord": {
+      "description": "Vector embedding and metadata for a text chunk",
+      "fields": {
+        "id": {
+          "type": "string (UUID)",
+          "primary_key": true,
+          "description": "Unique vector record identifier"
+        },
+        "chunk_id": {
+          "type": "string (UUID)",
+          "foreign_key": "TextChunk.id",
+          "required": true,
+          "description": "Reference to text chunk"
+        },
+        "file_id": {
+          "type": "string (UUID)",
+          "foreign_key": "FileMetadata.id",
+          "required": true,
+          "description": "Reference to parent file"
+        },
+        "embedding": {
+          "type": "number[] (vector)",
+          "required": true,
+          "description": "Dense embedding vector (typically 768 or 1536 dimensions)"
+        },
+        "embedding_model": {
+          "type": "string",
+          "description": "Model used to generate embedding"
+        },
+        "metadata": {
+          "type": "object",
+          "fields": {
+            "filename": "string",
+            "chunk_sequence": "number",
+            "page_number": "number | null",
+            "file_type": "string",
+            "content_preview": "string (first 100 chars)"
+          }
+        },
+        "indexed_at": {
+          "type": "string (ISO 8601)",
+          "description": "When embedding was created and indexed"
+        }
+      }
+    },
+    "ChatMessage": {
+      "description": "Conversation history record",
+      "fields": {
+        "id": {
+          "type": "string (UUID)",
+          "primary_key": true,
+          "description": "Unique message identifier"
+        },
+        "conversation_id": {
+          "type": "string (UUID)",
+          "required": true,
+          "description": "Session identifier for grouping messages"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "assistant", "system"],
+          "required": true,
+          "description": "Message sender role"
+        },
+        "content": {
+          "type": "string",
+          "required": true,
+          "description": "Message text content"
+        },
+        "citations": {
+          "type": "object[]",
+          "description": "Source chunks used for assistant response",
+          "fields": {
+            "chunk_id": "string (UUID)",
+            "file_id": "string (UUID)",
+            "filename": "string",
+            "similarity_score": "number (0-1)",
+            "page_number": "number | null"
+          }
+        },
+        "tokens_used": {
+          "type": "number",
+          "nullable": true,
+          "description": "Token count for this message"
+        },
+        "created_at": {
+          "type": "string (ISO 8601)",
+          "description": "Message timestamp"
+        }
+      }
+    }
+  },
+  "ui_specification": {
+    "layout": {
+      "type": "4-Tab Navigation Interface",
+      "tabs": [
+        {
+          "id": "tab_chat",
+          "label": "Chat",
+          "icon": "MessageSquare",
+          "route": "/"
+        },
+        {
+          "id": "tab_files",
+          "label": "File Manager",
+          "icon": "FolderOpen",
+          "route": "/files"
+        },
+        {
+          "id": "tab_vector",
+          "label": "Vector Inspector",
+          "icon": "Database",
+          "route": "/vector"
+        },
+        {
+          "id": "tab_settings",
+          "label": "RAG Settings",
+          "icon": "Settings",
+          "route": "/settings"
+        }
+      ]
+    },
+    "tabs": {
+      "tab_1_chatbot": {
+        "title": "Conversational RAG Chat",
+        "description": "Streamable chatbot interface with clickable source citation badges",
+        "components": [
+          {
+            "name": "ChatContainer",
+            "type": "flex-column",
+            "description": "Main chat interface container"
+          },
+          {
+            "name": "MessageList",
+            "type": "scrollable-area",
+            "features": [
+              "Auto-scroll to latest message",
+              "Message bubbles with role distinction (user/assistant)",
+              "Streaming animation for assistant responses",
+              "Timestamp display"
+            ]
+          },
+          {
+            "name": "MessageBubble",
+            "type": "component",
+            "variants": {
+              "user": {
+                "alignment": "right",
+                "background": "bg-blue-600",
+                "text_color": "text-white"
+              },
+              "assistant": {
+                "alignment": "left",
+                "background": "bg-gray-100",
+                "text_color": "text-gray-900"
+              }
+            },
+            "children": [
+              {
+                "name": "MessageContent",
+                "type": "text",
+                "features": ["Markdown rendering", "Code syntax highlighting"]
+              },
+              {
+                "name": "CitationBadges",
+                "type": "inline-badges",
+                "description": "Clickable badges showing source documents",
+                "features": [
+                  "Display filename and page number",
+                  "Click to open source preview modal",
+                  "Hover tooltip with chunk preview (first 150 chars)",
+                  "Color-coded by file"
+                ]
+              }
+            ]
+          },
+          {
+            "name": "ChatInput",
+            "type": "textarea",
+            "features": [
+              "Auto-expanding text area",
+              "Send button (enabled when text present)",
+              "Shift+Enter for new line",
+              "Enter to send",
+              "Loading state during streaming",
+              "File filter dropdown (optional: limit search to specific files)"
+            ]
+          },
+          {
+            "name": "SourcePreviewModal",
+            "type": "modal",
+            "trigger": "Citation badge click",
+            "content": {
+              "header": "Filename, page number, similarity score",
+              "body": "Full chunk text content with highlighting",
+              "footer": "Link to open file in File Manager tab"
+            }
+          }
+        ]
+      },
+      "tab_2_file_manager": {
+        "title": "Local File Manager",
+        "description": "Document upload, listing, deletion, and text preview drawer",
+        "components": [
+          {
+            "name": "FileManagerLayout",
+            "type": "split-view",
+            "sections": [
+              {
+                "name": "FileList",
+                "position": "left",
+                "width": "60%"
+              },
+              {
+                "name": "PreviewDrawer",
+                "position": "right",
+                "width": "40%",
+                "collapsible": true
+              }
+            ]
+          },
+          {
+            "name": "UploadArea",
+            "type": "dropzone",
+            "features": [
+              "Drag-and-drop file upload",
+              "Click to browse file picker",
+              "Accepted formats: PDF, DOCX, DOC, XLSX, XLS",
+              "Multiple file upload support",
+              "Upload progress indicator",
+              "Automatic indexing after upload"
+            ]
+          },
+          {
+            "name": "FileTable",
+            "type": "data-table",
+            "columns": [
+              {
+                "key": "filename",
+                "label": "Filename",
+                "sortable": true
+              },
+              {
+                "key": "file_type",
+                "label": "Type",
+                "sortable": true
+              },
+              {
+                "key": "size",
+                "label": "Size",
+                "sortable": true,
+                "format": "human-readable (KB, MB)"
+              },
+              {
+                "key": "chunks_count",
+                "label": "Chunks",
+                "sortable": true
+              },
+              {
+                "key": "uploaded_at",
+                "label": "Uploaded",
+                "sortable": true,
+                "format": "relative time (e.g., '2 hours ago')"
+              },
+              {
+                "key": "actions",
+                "label": "Actions",
+                "sortable": false
+              }
+            ],
+            "row_actions": [
+              {
+                "name": "Preview",
+                "icon": "Eye",
+                "action": "Open preview drawer"
+              },
+              {
+                "name": "Delete",
+                "icon": "Trash",
+                "action": "Delete file with confirmation",
+                "confirmation": "Are you sure? This will remove {filename} and all associated chunks."
+              }
+            ],
+            "features": [
+              "Click row to open preview",
+              "Pagination (20 items per page)",
+              "Search/filter by filename",
+              "Sort by any column"
+            ]
+          },
+          {
+            "name": "PreviewDrawer",
+            "type": "side-panel",
+            "trigger": "File row click or Preview action",
+            "content": {
+              "header": {
+                "title": "Filename",
+                "subtitle": "File type, size, upload date",
+                "actions": ["Close", "Delete"]
+              },
+              "body": {
+                "sections": [
+                  {
+                    "name": "Metadata",
+                    "fields": [
+                      "File ID",
+                      "Size",
+                      "Chunks count",
+                      "Indexed status",
+                      "Chunk size/overlap config"
+                    ]
+                  },
+                  {
+                    "name": "TextPreview",
+                    "description": "Scrollable text content preview",
+                    "features": [
+                      "Display all chunks in sequence order",
+                      "Show chunk boundaries with dividers",
+                      "Highlight search terms (if applicable)",
+                      "Jump to chunk navigation"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "tab_3_vector_inspector": {
+        "title": "Vector DB Inspector",
+        "description": "Chunk ID, metadata, text viewer, and similarity search testing",
+        "components": [
+          {
+            "name": "VectorInspectorLayout",
+            "type": "vertical-split",
+            "sections": [
+              {
+                "name": "SearchPanel",
+                "height": "30%"
+              },
+              {
+                "name": "ChunkListPanel",
+                "height": "70%"
+              }
+            ]
+          },
+          {
+            "name": "SearchPanel",
+            "type": "card",
+            "components": [
+              {
+                "name": "SearchInput",
+                "type": "textarea",
+                "placeholder": "Enter query to test semantic similarity search...",
+                "features": ["Real-time embedding generation", "Top-K slider"]
+              },
+              {
+                "name": "FilterControls",
+                "type": "form-controls",
+                "fields": [
+                  {
+                    "name": "file_filter",
+                    "label": "Filter by File",
+                    "type": "multi-select",
+                    "options": "Dynamic file list"
+                  },
+                  {
+                    "name": "top_k",
+                    "label": "Top-K Results",
+                    "type": "slider",
+                    "min": 1,
+                    "max": 50,
+                    "default": 10
+                  },
+                  {
+                    "name": "list_all_mode",
+                    "label": "List All Chunks",
+                    "type": "checkbox",
+                    "description": "Disable similarity search, show all chunks"
+                  }
+                ]
+              },
+              {
+                "name": "SearchButton",
+                "type": "button",
+                "label": "Search",
+                "action": "POST /api/vector-inspect"
+              }
+            ]
+          },
+          {
+            "name": "ChunkListPanel",
+            "type": "data-table",
+            "columns": [
+              {
+                "key": "chunk_id",
+                "label": "Chunk ID",
+                "format": "Short UUID (first 8 chars)"
+              },
+              {
+                "key": "file_name",
+                "label": "Source File",
+                "sortable": true
+              },
+              {
+                "key": "sequence",
+                "label": "Seq #",
+                "sortable": true
+              },
+              {
+                "key": "page_number",
+                "label": "Page",
+                "sortable": true
+              },
+              {
+                "key": "content_preview",
+                "label": "Content Preview",
+                "format": "First 100 characters"
+              },
+              {
+                "key": "similarity_score",
+                "label": "Similarity",
+                "visible_when": "Search mode active",
+                "format": "Percentage (e.g., 87.3%)"
+              },
+              {
+                "key": "actions",
+                "label": "Actions"
+              }
+            ],
+            "row_actions": [
+              {
+                "name": "View Full Text",
+                "icon": "Eye",
+                "action": "Open chunk detail modal"
+              }
+            ],
+            "features": [
+              "Expandable rows to show full chunk text",
+              "Pagination",
+              "Export results to JSON",
+              "Similarity score bar chart (when in search mode)"
+            ]
+          },
+          {
+            "name": "ChunkDetailModal",
+            "type": "modal",
+            "trigger": "View Full Text action",
+            "content": {
+              "header": "Chunk ID, Source File, Sequence #",
+              "body": {
+                "sections": [
+                  {
+                    "name": "Metadata",
+                    "fields": [
+                      "Chunk ID",
+                      "File ID",
+                      "Sequence number",
+                      "Page number",
+                      "Character range (start-end)",
+                      "Embedding model",
+                      "Indexed timestamp"
+                    ]
+                  },
+                  {
+                    "name": "FullText",
+                    "description": "Complete chunk content",
+                    "features": ["Syntax highlighting", "Copy to clipboard"]
+                  },
+                  {
+                    "name": "EmbeddingVisualization",
+                    "description": "Optional: Show embedding vector dimensions (first 20)",
+                    "format": "Array of numbers with scientific notation"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "tab_4_rag_settings": {
+        "title": "RAG Configuration",
+        "description": "Real-time parameter adjustment: Chunk Size, Overlap, Top-K",
+        "components": [
+          {
+            "name": "SettingsLayout",
+            "type": "form-container",
+            "width": "max-w-2xl",
+            "centered": true
+          },
+          {
+            "name": "ChunkingSettings",
+            "type": "settings-section",
+            "title": "Text Chunking Configuration",
+            "description": "Controls how documents are split into chunks for embedding",
+            "fields": [
+              {
+                "name": "chunk_size",
+                "label": "Chunk Size (characters)",
+                "type": "slider",
+                "min": 100,
+                "max": 2000,
+                "step": 50,
+                "default": 500,
+                "description": "Number of characters per text chunk. Larger chunks preserve more context but may reduce precision.",
+                "live_preview": true
+              },
+              {
+                "name": "chunk_overlap",
+                "label": "Chunk Overlap (characters)",
+                "type": "slider",
+                "min": 0,
+                "max": 500,
+                "step": 10,
+                "default": 50,
+                "description": "Number of overlapping characters between consecutive chunks. Helps maintain context continuity.",
+                "validation": "Must be less than chunk_size"
+              }
+            ],
+            "actions": [
+              {
+                "name": "Apply to New Uploads",
+                "type": "button",
+                "action": "Save settings to local storage / user preferences"
+              },
+              {
+                "name": "Re-index Existing Files",
+                "type": "button",
+                "variant": "secondary",
+                "action": "Trigger re-chunking and re-embedding of all files",
+                "confirmation": "This will re-process all files with new settings. Continue?"
+              }
+            ]
+          },
+          {
+            "name": "RetrievalSettings",
+            "type": "settings-section",
+            "title": "RAG Retrieval Configuration",
+            "description": "Controls how many relevant chunks are retrieved for context",
+            "fields": [
+              {
+                "name": "default_top_k",
+                "label": "Default Top-K Results",
+                "type": "slider",
+                "min": 1,
+                "max": 20,
+                "step": 1,
+                "default": 5,
+                "description": "Number of most similar chunks to retrieve for RAG context. More chunks = more context but slower response.",
+                "live_preview": false
+              },
+              {
+                "name": "similarity_threshold",
+                "label": "Similarity Threshold",
+                "type": "slider",
+                "min": 0.0,
+                "max": 1.0,
+                "step": 0.05,
+                "default": 0.5,
+                "description": "Minimum similarity score (0-1) for chunks to be included. Higher = stricter relevance.",
+                "live_preview": false
+              }
+            ]
+          },
+          {
+            "name": "LLMSettings",
+            "type": "settings-section",
+            "title": "LLM Configuration",
+            "description": "Local LLM connection and generation parameters",
+            "fields": [
+              {
+                "name": "llm_base_url",
+                "label": "LLM Base URL",
+                "type": "text-input",
+                "placeholder": "http://localhost:8000",
+                "description": "Local LLM API endpoint (from process.env.LOCAL_LLM_BASE_URL)",
+                "readonly": true,
+                "note": "Configure in .env.local"
+              },
+              {
+                "name": "temperature",
+                "label": "Temperature",
+                "type": "slider",
+                "min": 0.0,
+                "max": 2.0,
+                "step": 0.1,
+                "default": 0.7,
+                "description": "Controls randomness. Lower = more deterministic, Higher = more creative."
+              },
+              {
+                "name": "max_tokens",
+                "label": "Max Response Tokens",
+                "type": "number-input",
+                "min": 100,
+                "max": 4000,
+                "default": 1000,
+                "description": "Maximum length of LLM responses"
+              }
+            ]
+          },
+          {
+            "name": "StorageSettings",
+            "type": "settings-section",
+            "title": "Storage & Security",
+            "description": "Local data storage configuration",
+            "fields": [
+              {
+                "name": "upload_path",
+                "label": "Upload Storage Path",
+                "type": "text-input",
+                "value": "./storage/uploads",
+                "readonly": true,
+                "description": "Local directory for uploaded files"
+              },
+              {
+                "name": "vector_db_path",
+                "label": "Vector DB Path",
+                "type": "text-input",
+                "value": "./storage/vectordb",
+                "readonly": true,
+                "description": "Local directory for vector database"
+              }
+            ],
+            "actions": [
+              {
+                "name": "Clear All Data",
+                "type": "button",
+                "variant": "destructive",
+                "action": "Delete all files, chunks, and embeddings",
+                "confirmation": "WARNING: This will permanently delete all uploaded files and vector data. This cannot be undone. Type 'DELETE' to confirm."
+              }
+            ]
+          },
+          {
+            "name": "SystemInfo",
+            "type": "info-section",
+            "title": "System Information",
+            "fields": [
+              {
+                "label": "Total Files Uploaded",
+                "value": "Dynamic: count from FileMetadata"
+              },
+              {
+                "label": "Total Chunks Indexed",
+                "value": "Dynamic: count from VectorRecord"
+              },
+              {
+                "label": "Storage Used",
+                "value": "Dynamic: sum of file sizes"
+              },
+              {
+                "label": "Vector DB Status",
+                "value": "Dynamic: connected | error"
+              },
+              {
+                "label": "LLM Connection Status",
+                "value": "Dynamic: reachable | unreachable"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "component_tree": {
+    "description": "High-level component hierarchy for the application",
+    "root": {
+      "name": "App",
+      "type": "Next.js App Router Layout",
+      "path": "app/layout.tsx",
+      "children": [
+        {
+          "name": "RootLayout",
+          "components": [
+            {
+              "name": "Header",
+              "children": ["Logo", "ProjectTitle", "ThemeToggle"]
+            },
+            {
+              "name": "NavigationTabs",
+              "children": ["TabChat", "TabFiles", "TabVector", "TabSettings"]
+            },
+            {
+              "name": "PageContent",
+              "type": "Dynamic route outlet"
+            }
+          ]
+        }
+      ]
+    },
+    "pages": [
+      {
+        "route": "/",
+        "file": "app/page.tsx",
+        "component": "ChatPage",
+        "children": [
+          "ChatContainer",
+          "MessageList",
+          "MessageBubble",
+          "CitationBadges",
+          "ChatInput",
+          "SourcePreviewModal"
+        ]
+      },
+      {
+        "route": "/files",
+        "file": "app/files/page.tsx",
+        "component": "FileManagerPage",
+        "children": [
+          "FileManagerLayout",
+          "UploadArea",
+          "FileTable",
+          "PreviewDrawer"
+        ]
+      },
+      {
+        "route": "/vector",
+        "file": "app/vector/page.tsx",
+        "component": "VectorInspectorPage",
+        "children": [
+          "VectorInspectorLayout",
+          "SearchPanel",
+          "ChunkListPanel",
+          "ChunkDetailModal"
+        ]
+      },
+      {
+        "route": "/settings",
+        "file": "app/settings/page.tsx",
+        "component": "SettingsPage",
+        "children": [
+          "SettingsLayout",
+          "ChunkingSettings",
+          "RetrievalSettings",
+          "LLMSettings",
+          "StorageSettings",
+          "SystemInfo"
+        ]
+      }
+    ],
+    "api_routes": [
+      {
+        "route": "/api/upload",
+        "file": "app/api/upload/route.ts",
+        "handler": "POST"
+      },
+      {
+        "route": "/api/files",
+        "file": "app/api/files/route.ts",
+        "handlers": ["GET", "DELETE"]
+      },
+      {
+        "route": "/api/vector-inspect",
+        "file": "app/api/vector-inspect/route.ts",
+        "handler": "POST"
+      },
+      {
+        "route": "/api/chat",
+        "file": "app/api/chat/route.ts",
+        "handler": "POST (streaming)"
+      }
+    ],
+    "shared_components": [
+      {
+        "name": "Button",
+        "path": "components/ui/button.tsx",
+        "library": "shadcn/ui"
+      },
+      {
+        "name": "Card",
+        "path": "components/ui/card.tsx",
+        "library": "shadcn/ui"
+      },
+      {
+        "name": "Input",
+        "path": "components/ui/input.tsx",
+        "library": "shadcn/ui"
+      },
+      {
+        "name": "Textarea",
+        "path": "components/ui/textarea.tsx",
+        "library": "shadcn/ui"
+      },
+      {
+        "name": "Slider",
+        "path": "components/ui/slider.tsx",
+        "library": "shadcn/ui"
+      },
+      {
+        "name": "Table",
+        "path": "components/ui/table.tsx",
+        "library": "shadcn/ui"
+      },
+      {
+        "name": "Modal",
+        "path": "components/ui/modal.tsx",
+        "library": "shadcn/ui"
+      },
+      {
+        "name": "Tabs",
+        "path": "components/ui/tabs.tsx",
+        "library": "shadcn/ui"
+      }
+    ],
+    "utilities": [
+      {
+        "name": "documentParser",
+        "path": "lib/parsers/document-parser.ts",
+        "description": "Unified interface for parsing PDF, DOCX, XLSX files"
+      },
+      {
+        "name": "textChunker",
+        "path": "lib/chunking/text-chunker.ts",
+        "description": "Split text into chunks with configurable size and overlap"
+      },
+      {
+        "name": "embeddingClient",
+        "path": "lib/embedding/embedding-client.ts",
+        "description": "Client for generating embeddings via LOCAL_EMBEDDING_URL"
+      },
+      {
+        "name": "vectorDB",
+        "path": "lib/vector-db/vector-db.ts",
+        "description": "Interface for local vector database operations"
+      },
+      {
+        "name": "llmClient",
+        "path": "lib/llm/llm-client.ts",
+        "description": "Streaming client for LOCAL_LLM_BASE_URL"
+      },
+      {
+        "name": "fileStorage",
+        "path": "lib/storage/file-storage.ts",
+        "description": "File system operations for ./storage/uploads"
+      }
+    ]
+  },
+  "security_and_environment": {
+    "environment_variables": {
+      "LOCAL_LLM_BASE_URL": {
+        "required": true,
+        "description": "Base URL for local LLM API (e.g., http://localhost:8000)",
+        "example": "http://192.168.1.100:8000"
+      },
+      "LOCAL_EMBEDDING_URL": {
+        "required": true,
+        "description": "Base URL for local embedding service",
+        "example": "http://localhost:9000/embed"
+      },
+      "UPLOAD_STORAGE_PATH": {
+        "required": false,
+        "default": "./storage/uploads",
+        "description": "Local directory for uploaded files"
+      },
+      "VECTOR_DB_PATH": {
+        "required": false,
+        "default": "./storage/vectordb",
+        "description": "Local directory for vector database"
+      },
+      "MAX_FILE_SIZE_MB": {
+        "required": false,
+        "default": "50",
+        "description": "Maximum file upload size in megabytes"
+      }
+    },
+    "gitignore_entries": [
+      ".env.local",
+      "storage/",
+      "*.db",
+      "*.sqlite"
+    ],
+    "security_principles": [
+      "All API endpoints, credentials, and file paths are read from environment variables",
+      "No hardcoded secrets or absolute paths in code",
+      "Files stored in local ./storage/ directory, excluded from git",
+      "100% local processing - no external API calls",
+      "No data leaves the local machine"
+    ]
+  },
+  "tech_stack": {
+    "frontend": {
+      "framework": "Next.js 14+ (App Router)",
+      "language": "TypeScript",
+      "ui": "React 18+",
+      "styling": "Tailwind CSS",
+      "components": "shadcn/ui",
+      "icons": "lucide-react",
+      "state": "React Context / Zustand",
+      "http": "fetch / axios"
+    },
+    "backend": {
+      "runtime": "Node.js 18+",
+      "api": "Next.js API Routes",
+      "file_parsing": [
+        "pdf-parse (PDF)",
+        "mammoth (DOCX)",
+        "xlsx (Excel)"
+      ],
+      "vector_db": "Local Vector DB (e.g., FAISS, Chroma, or custom)",
+      "file_storage": "Node.js fs module"
+    },
+    "integrations": {
+      "llm": "Local LLM via OpenAI-compatible API",
+      "embeddings": "Local embedding service"
+    },
+    "development": {
+      "package_manager": "npm / yarn / pnpm",
+      "linting": "ESLint",
+      "formatting": "Prettier",
+      "type_checking": "TypeScript strict mode"
+    }
+  },
+  "implementation_notes": {
+    "phase_1_setup": [
+      "Initialize Next.js project with TypeScript and App Router",
+      "Install shadcn/ui and configure Tailwind CSS",
+      "Create ./storage/uploads and ./storage/vectordb directories",
+      "Set up .env.local with LOCAL_LLM_BASE_URL and LOCAL_EMBEDDING_URL",
+      "Add storage/ to .gitignore"
+    ],
+    "phase_2_backend": [
+      "Implement /api/upload route with file parsing and chunking",
+      "Set up vector DB client and embedding generation",
+      "Implement /api/files GET and DELETE routes",
+      "Implement /api/vector-inspect with similarity search",
+      "Implement /api/chat with RAG retrieval and streaming"
+    ],
+    "phase_3_frontend": [
+      "Build 4-tab navigation layout",
+      "Implement Chat page with streaming and citations",
+      "Implement File Manager page with upload and preview",
+      "Implement Vector Inspector page with search",
+      "Implement Settings page with sliders and configuration"
+    ],
+    "phase_4_integration": [
+      "Connect frontend to API routes",
+      "Test end-to-end RAG flow",
+      "Add error handling and loading states",
+      "Optimize performance and UX"
+    ]
+  }
+}
