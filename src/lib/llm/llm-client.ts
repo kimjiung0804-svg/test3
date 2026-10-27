@@ -1,10 +1,11 @@
 /**
  * Streaming OpenAI-compatible chat client.
- * Default Active Server = http://192.168.0.201:11434/v1
+ * Default Active Server = http://192.168.0.201:11434 (no /v1 suffix;
+ * chatCompletionsUrl / modelsListUrl append /v1/... as needed).
  * LOCAL_LLM_BASE_URL is an optional override only (never required).
  */
 
-export const DEFAULT_LLM_BASE_URL = "http://192.168.0.201:11434/v1";
+export const DEFAULT_LLM_BASE_URL = "http://192.168.0.201:11434";
 
 export class LlmConfigError extends Error {
   constructor(message: string) {
