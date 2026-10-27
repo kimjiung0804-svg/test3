@@ -248,6 +248,11 @@ export async function similaritySearch(params: {
   /** Limit search to one or more file IDs (chat `file_filter`). */
   fileIds?: string[];
   topK?: number;
+  /**
+   * Minimum cosine similarity (0–1). Chunks below this are dropped.
+   * When set, an empty result means low-confidence / no relevant context.
+   */
+  minScore?: number;
 }): Promise<VectorInspectChunk[]> {
   const vectorDbPath = await ensureVectorDirs();
   const catalog = await readCatalog(vectorDbPath);
@@ -276,7 +281,18 @@ export async function similaritySearch(params: {
 
   scored.sort((a, b) => (b.similarity_score ?? 0) - (a.similarity_score ?? 0));
   const topK = Math.max(1, Math.min(100, params.topK ?? 10));
-  return scored.slice(0, topK);
+  let top = scored.slice(0, topK);
+
+  if (
+    typeof params.minScore === "number" &&
+    Number.isFinite(params.minScore) &&
+    params.minScore > 0
+  ) {
+    const threshold = Math.min(1, Math.max(0, params.minScore));
+    top = top.filter((c) => (c.similarity_score ?? 0) >= threshold);
+  }
+
+  return top;
 }
 
 export async function getVectorStats(): Promise<{
