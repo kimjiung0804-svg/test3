@@ -78,6 +78,15 @@ export interface ChatMessage {
   created_at: string;
 }
 
+/** Persisted chat session under ./storage/chats/{id}.json */
+export interface ChatSession {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  messages: ChatMessage[];
+}
+
 /** SSE payload shapes for /api/chat streaming. */
 export type ChatStreamEvent =
   | { type: "citations"; citations: CitationData[] }
