@@ -146,6 +146,47 @@ export async function getExtractedText(fileId: string): Promise<string | null> {
   }
 }
 
+/** Write/replace extracted.txt for an existing upload (reparse). */
+export async function saveExtractedText(
+  fileId: string,
+  text: string,
+): Promise<void> {
+  const { storagePath } = await ensureStorageDirs();
+  const dir = fileDir(storagePath, fileId);
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, TEXT_FILENAME), text, "utf-8");
+}
+
+/** Read original uploaded bytes from uploads/{id}/original.{ext}. */
+export async function getOriginalFileBuffer(
+  fileId: string,
+  filename?: string,
+): Promise<Buffer | null> {
+  const { storagePath } = await ensureStorageDirs();
+  const dir = fileDir(storagePath, fileId);
+
+  if (filename) {
+    const ext = path.extname(filename).toLowerCase();
+    try {
+      return await readFile(path.join(dir, `${ORIGINAL_BASENAME}${ext}`));
+    } catch {
+      /* fall through to directory scan */
+    }
+  }
+
+  try {
+    const entries = await readdir(dir);
+    const original = entries.find(
+      (name) =>
+        name === ORIGINAL_BASENAME || name.startsWith(`${ORIGINAL_BASENAME}.`),
+    );
+    if (!original) return null;
+    return await readFile(path.join(dir, original));
+  } catch {
+    return null;
+  }
+}
+
 export async function deleteFile(
   fileId: string,
 ): Promise<{ deleted: boolean; chunks_removed: number }> {
