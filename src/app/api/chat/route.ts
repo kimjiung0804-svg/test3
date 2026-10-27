@@ -19,6 +19,12 @@ interface ChatBody {
   conversation_id?: string;
   top_k?: number;
   file_filter?: string[];
+  /** Per-request OpenAI-compatible base URL (UI selector). Env is default only. */
+  baseUrl?: string;
+  /** Alias for baseUrl. */
+  base_url?: string;
+  /** Per-request model id (UI selector). */
+  model?: string;
 }
 
 function errorResponse(status: number, error: string, message: string) {
@@ -55,6 +61,15 @@ export async function POST(request: Request) {
         ? body.conversation_id.trim()
         : undefined;
 
+    const baseUrlOverride =
+      (typeof body.baseUrl === "string" && body.baseUrl.trim()) ||
+      (typeof body.base_url === "string" && body.base_url.trim()) ||
+      undefined;
+    const modelOverride =
+      typeof body.model === "string" && body.model.trim()
+        ? body.model.trim()
+        : undefined;
+
     // 1) Embed query  2) Top-K similarity search
     const embedded = await embedText(message);
     const chunks = await similaritySearch({
@@ -79,6 +94,8 @@ export async function POST(request: Request) {
 
           for await (const token of streamChatCompletion({
             messages,
+            baseUrl: baseUrlOverride,
+            model: modelOverride,
             signal: request.signal,
           })) {
             assistantText += token;
