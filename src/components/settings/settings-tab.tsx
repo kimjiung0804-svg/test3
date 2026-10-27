@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { CheckCircle2, CircleAlert, Loader2, Wifi } from "lucide-react";
+import { ServerModelControls } from "@/components/llm/server-model-controls";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,6 +15,7 @@ import {
 import { Label } from "@/components/ui/label";
 import { Slider } from "@/components/ui/slider";
 import { useRagSettings } from "@/hooks/use-rag-settings";
+import { resolveActiveServerUrl } from "@/lib/llm-servers";
 import { DEFAULT_RAG_SETTINGS } from "@/lib/rag-settings";
 
 type LlmStatus = "checking" | "ready" | "missing" | "error";
@@ -23,8 +25,10 @@ export function SettingsTab() {
   const [llmStatus, setLlmStatus] = useState<LlmStatus>("checking");
   const [llmDetail, setLlmDetail] = useState("Checking API routes…");
   const [savedFlash, setSavedFlash] = useState(false);
+  const serverUrl = resolveActiveServerUrl(settings);
 
   useEffect(() => {
+    if (!ready) return;
     let cancelled = false;
     async function probe() {
       try {
@@ -37,7 +41,8 @@ export function SettingsTab() {
           return;
         }
 
-        const healthRes = await fetch("/api/llm/health");
+        const qs = new URLSearchParams({ server_url: serverUrl });
+        const healthRes = await fetch(`/api/llm/health?${qs.toString()}`);
         const health = await healthRes.json().catch(() => ({}));
 
         if (cancelled) return;
@@ -51,7 +56,7 @@ export function SettingsTab() {
         if (health.ok) {
           setLlmStatus("ready");
           setLlmDetail(
-            `LLM reachable · ${health.base_url || "default 201"} · ${health.model_count ?? "?"} models`,
+            `LLM reachable · ${health.base_url || serverUrl} · ${health.model_count ?? "?"} models`,
           );
           return;
         }
@@ -68,7 +73,7 @@ export function SettingsTab() {
         if (body.error === "invalid_request" || chatRes.status === 400) {
           setLlmStatus("ready");
           setLlmDetail(
-            `Chat API ready · default ${health.default_base_url || "http://192.168.0.201:11434/v1"} (LLM probe: ${health.error || "unreachable"})`,
+            `Chat API ready · active ${serverUrl} (LLM probe: ${health.error || "unreachable"})`,
           );
           return;
         }
@@ -86,7 +91,7 @@ export function SettingsTab() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [ready, serverUrl]);
 
   function flashSaved() {
     setSavedFlash(true);
@@ -106,43 +111,42 @@ export function SettingsTab() {
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-4">
         <Card>
           <CardHeader>
-            <CardTitle>LLM connection</CardTitle>
+            <CardTitle>LLM server &amp; model</CardTitle>
             <CardDescription>
-              Local OpenAI-compatible endpoint from{" "}
-              <code className="rounded bg-muted px-1">.env.local</code>
+              Choose Server A/B or a Custom base URL. Model list comes from{" "}
+              <code className="rounded bg-muted px-1">/api/llm/models</code>{" "}
+              for the active server. Values persist in localStorage — not{" "}
+              <code className="rounded bg-muted px-1">.env.local</code>.
             </CardDescription>
           </CardHeader>
-          <CardContent className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <Wifi className="size-4 text-muted-foreground" />
-              {llmStatus === "checking" && (
-                <Badge variant="outline">
-                  <Loader2 className="animate-spin" /> Checking
-                </Badge>
-              )}
-              {llmStatus === "ready" && (
-                <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
-                  <CheckCircle2 /> Connected
-                </Badge>
-              )}
-              {llmStatus === "missing" && (
-                <Badge variant="secondary">
-                  <CircleAlert /> Pending API
-                </Badge>
-              )}
-              {llmStatus === "error" && (
-                <Badge variant="destructive">
-                  <CircleAlert /> Attention
-                </Badge>
-              )}
+          <CardContent className="space-y-4">
+            <ServerModelControls variant="settings" showHealthCheck />
+            <div className="flex flex-wrap items-center gap-3 border-t pt-3">
+              <div className="flex items-center gap-2">
+                <Wifi className="size-4 text-muted-foreground" />
+                {llmStatus === "checking" && (
+                  <Badge variant="outline">
+                    <Loader2 className="animate-spin" /> Checking
+                  </Badge>
+                )}
+                {llmStatus === "ready" && (
+                  <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">
+                    <CheckCircle2 /> Connected
+                  </Badge>
+                )}
+                {llmStatus === "missing" && (
+                  <Badge variant="secondary">
+                    <CircleAlert /> Pending API
+                  </Badge>
+                )}
+                {llmStatus === "error" && (
+                  <Badge variant="destructive">
+                    <CircleAlert /> Attention
+                  </Badge>
+                )}
+              </div>
+              <p className="text-sm text-muted-foreground">{llmDetail}</p>
             </div>
-            <p className="text-sm text-muted-foreground">{llmDetail}</p>
-            <p className="w-full text-xs text-muted-foreground">
-              Default Active Server{" "}
-              <code>http://192.168.0.201:11434/v1</code>. Pass{" "}
-              <code>server_url</code> / <code>selected_model</code> from the
-              client; <code>LOCAL_LLM_BASE_URL</code> is an optional override.
-            </p>
           </CardContent>
         </Card>
 
@@ -247,7 +251,15 @@ export function SettingsTab() {
             />
             <Button
               variant="outline"
-              onClick={() => update({ ...DEFAULT_RAG_SETTINGS })}
+              onClick={() =>
+                update({
+                  ...DEFAULT_RAG_SETTINGS,
+                  // Keep current server/model selection when resetting sliders
+                  server_preset: settings.server_preset,
+                  custom_server_url: settings.custom_server_url,
+                  selected_model: settings.selected_model,
+                })
+              }
             >
               Reset to defaults
             </Button>
@@ -268,7 +280,10 @@ export function SettingsTab() {
               Vector DB: <code>VECTORDB_PATH</code> (default{" "}
               <code>./storage/vectordb</code>)
             </p>
-            <p>Secrets stay in <code>.env.local</code> — never shipped to the client.</p>
+            <p>
+              LLM server/model live in browser localStorage —{" "}
+              <code>.env.local</code> is optional override only.
+            </p>
           </CardContent>
         </Card>
       </div>
